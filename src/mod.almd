@@ -15,6 +15,7 @@ fn parse_to_sexpr(grammar_json: String, input: String) -> Result[String, String]
   let g = grammar.read(grammar_json)!
   let bnf = normalize.build(g)!
   let t = tables.build(bnf)!
-  let tree = parse.run(t, bnf, input)!
+  let lx = parse.build_lexers(t, bnf)!
+  let tree = parse.run(t, lx, bnf, input)!
   ok(sexpr.render(bnf, tree))
 }

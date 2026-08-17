@@ -41,176 +41,272 @@ type Lexers = {
   extra_map: List[Int],
 }
 
-fn run(t: tables.Tables, bnf: normalize.Bnf, input: String) -> Result[Tree, String] = {
-  let lx = build_lexers(t, bnf)!
-  let cps = dfa.codepoints(input)
-  let n = list.len(cps)
-  let eof = bnf.n_terms
-  let n_nts = list.len(bnf.nt_display)
-  var state_stack: List[Int] = [0]
-  var nodes: List[Cst] = []
-  var trails: List[List[Cst]] = []
-  var leading: List[Cst] = []
-  var pos = 0
-  var done = false
-  var root = Leaf(0, 0, 0)
-  while not done {
-    let st = list.get_or(state_stack, list.len(state_stack) - 1, 0)
-    // ── lex one token in this state ────────────────
-    var tok = 0 - 1
-    var tok_len = 0
-    var lexed = false
-    while not lexed {
-      let di = list.get_or(lx.dfa_idx, st, 0 - 1)
-      var hit = false
-      if di >= 0 and pos < n then {
-        let m = dfa.scan_cps(list.get_or(lx.machines, di, lx.extras), cps, pos)
-        match m {
-          some(mm) => {
-            if mm.len > 0 then {
-              tok = list.get_or(list.get_or(lx.maps, di, []), mm.id, 0)
-              tok_len = mm.len
-              hit = true
-              ()
-            }
-            else ()
-          },
-          none => (),
-        }
-        ()
-      }
-      else ()
-      if hit then lexed = true
-      else if pos >= n then {
-        tok = eof
-        tok_len = 0
-        lexed = true
-        ()
-      }
-      else {
-        // Extras: skip whitespace, materialize named extras (comments).
-        let em = dfa.scan_cps(lx.extras, cps, pos)
-        let elen = match em { some(mm) => mm.len, none => 0 }
-        guard elen > 0 else err(lex_error(bnf, pos))
-        let eid = match em { some(mm) => mm.id, none => 0 }
-        let ext_term = list.get_or(lx.extra_map, eid, 0)
-        if list.get_or(bnf.term_named, ext_term, 0) == 1 then {
-          let node = Leaf(ext_term, pos, pos + elen)
-          if list.is_empty(nodes) then {
-            list.push(leading, node)
-            ()
-          }
-          else {
-            var tl = list.get_or(trails, list.len(trails) - 1, [])
-            tl = tl + [node]
-            trails[list.len(trails) - 1] = tl
-            ()
-          }
-          ()
-        }
-        else ()
-        pos = pos + elen
-        ()
-      }
-    }
-    // ── one ACTION step ────────────────────────────
-    let a = list.get_or(t.action, st * t.n_terms1 + tok, 0)
-    if tables.act_is_shift(a) then {
-      list.push(nodes, Leaf(tok, pos, pos + tok_len))
-      list.push(trails, [])
-      list.push(state_stack, tables.act_shift_state(a))
-      pos = pos + tok_len
-      ()
-    }
-    else if tables.act_is_reduce(a) or tables.act_is_accept(a) then {
-      let p = if tables.act_is_accept(a) then tables.act_accept_prod(a) else tables.act_reduce_prod(a)
-      let rhs = list.get_or(bnf.prod_rhs, p, [])
-      let k = list.len(rhs)
-      var children: List[Cst] = []
-      var new_trail: List[Cst] = []
-      let base = list.len(nodes) - k
-      for i in 0..<k {
-        let child = list.get_or(nodes, base + i, root)
-        let tl = list.get_or(trails, base + i, [])
-        list.push(children, child)
-        if i == k - 1 then new_trail = tl
-        else children = children + tl
-      }
-      var j = 0
-      while j < k {
-        let _ = list.pop(nodes)
-        let _ = list.pop(trails)
-        let _ = list.pop(state_stack)
-        j = j + 1
-      }
-      let lhs = list.get_or(bnf.prod_lhs, p, 0)
-      list.push(nodes, Inner(lhs, children))
-      list.push(trails, new_trail)
-      if tables.act_is_accept(a) then {
-        root = Inner(lhs, children)
-        done = true
-        ()
-      }
-      else {
-        let st2 = list.get_or(state_stack, list.len(state_stack) - 1, 0)
-        let g = list.get_or(t.goto_t, st2 * n_nts + lhs, 0)
-        guard g != 0 else err("internal: missing goto")
-        list.push(state_stack, g - 1)
-        ()
-      }
-      ()
-    }
-    else {
-      let tn = if tok == eof then "<eof>" else list.get_or(bnf.term_display, tok, "?")
-      guard false else err("parse error at ${int.to_string(pos)}: unexpected '${tn}'")
-      ()
-    }
-  }
-  let trailing = list.get_or(trails, list.len(trails) - 1, [])
-  ok(Tree { leading: leading, root: root, trailing: trailing })
+// `run` takes the prebuilt Lexers so its own body carries NO `!` — a leading
+// `!` would turn the whole loop into a heap-result match arm, outside the
+// wasm subset; the caller chains build_lexers + run instead (the proven
+// pipeline shape).
+// The parser state threaded by value through the pure-recursive step loop.
+// Trails are FLATTENED (trail_flat + per-node end offsets) — a
+// List[List[Cst]] record field is outside the wasm construct subset, and the
+// flat pair is also simply less allocation. trail of node i =
+// trail_flat[ends[i-1] .. ends[i]].
+type PState = {
+  state_stack: List[Int],
+  nodes: List[Cst],
+  trail_flat: List[Cst],
+  trail_ends: List[Int],
+  leading: List[Cst],
+  pos: Int,
 }
 
-fn lex_error(bnf: normalize.Bnf, pos: Int) -> String =
-  "lex error at ${int.to_string(pos)}"
+// One lexed token: id, length, the position after any skipped extras, and the
+// named extra nodes (comments) collected on the way. fail=1 → no lex possible.
+type LexOut = {
+  tok: Int,
+  len: Int,
+  pos: Int,
+  extras: List[Cst],
+  fail: Int,
+}
 
-// ── per-state lexers ───────────────────────────────
+// `run` is PURE-RECURSIVE end to end (state by value, no loops, no `!` in the
+// body, no record spreads) — the style the wasm value subset admits for a
+// branchy interpreter today, and the shape almide/dfa's runtime uses.
+fn run(t: tables.Tables, lx: Lexers, bnf: normalize.Bnf, input: String) -> Result[Tree, String] = {
+  let cps = dfa.codepoints(input)
+  let st0 = PState {
+    state_stack: [0], nodes: [], trail_flat: [], trail_ends: [], leading: [], pos: 0,
+  }
+  step(t, lx, bnf, cps, list.len(cps), st0)
+}
 
-fn build_lexers(t: tables.Tables, bnf: normalize.Bnf) -> Result[Lexers, String] = {
-  var dfa_idx: List[Int] = []
-  var machines: List[dfa.Dfa] = []
-  var maps: List[List[Int]] = []
-  for s in 0..<t.n_states {
-    // Valid terminals of this state, ordered by (-token prec, id): dfa breaks
-    // a length tie by LOWER pattern index, so higher-prec-then-earlier wins.
-    var terms: List[Int] = []
-    for tid in 0..<bnf.n_terms {
-      if list.get_or(t.action, s * t.n_terms1 + tid, 0) != 0 then {
-        list.push(terms, tid)
-        ()
-      }
-      else ()
+fn step(
+  t: tables.Tables,
+  lx: Lexers,
+  bnf: normalize.Bnf,
+  cps: List[Int],
+  n: Int,
+  ps: PState,
+) -> Result[Tree, String] = {
+  let st = list.get_or(ps.state_stack, list.len(ps.state_stack) - 1, 0)
+  let lo = lex_one(lx, bnf, cps, n, st, ps.pos, [])
+  guard lo.fail == 0 else err("lex error at ${int.to_string(lo.pos)}")
+  let ps2 = attach_extras(ps, lo.extras)
+  let a = list.get_or(t.action, st * t.n_terms1 + lo.tok, 0)
+  if tables.act_is_shift(a) then {
+    let ps3 = PState {
+      state_stack: ps2.state_stack + [tables.act_shift_state(a)],
+      nodes: ps2.nodes + [Leaf(lo.tok, lo.pos, lo.pos + lo.len)],
+      trail_flat: ps2.trail_flat,
+      trail_ends: ps2.trail_ends + [list.len(ps2.trail_flat)],
+      leading: ps2.leading,
+      pos: lo.pos + lo.len,
     }
-    terms = list.sort_by(terms, (tid) => 0 - list.get_or(bnf.term_prec, tid, 0) * 100000 + tid)
-    if list.is_empty(terms) then {
-      list.push(dfa_idx, 0 - 1)
-      ()
-    }
+    step(t, lx, bnf, cps, n, ps3)
+  }
+  else if tables.act_is_reduce(a) or tables.act_is_accept(a) then {
+    let p = if tables.act_is_accept(a) then tables.act_accept_prod(a) else tables.act_reduce_prod(a)
+    let rhs = list.get_or(bnf.prod_rhs, p, [])
+    let k = list.len(rhs)
+    let base = list.len(ps2.nodes) - k
+    let children = collect_children(ps2, base, k, 0, [])
+    // The LAST child's trail becomes the new node's own trail.
+    let last_start = trail_start(ps2, base + k - 1)
+    let last_end = if k == 0 then 0 else list.get_or(ps2.trail_ends, base + k - 1, 0)
+    let new_trail = if k == 0 then [] else list.slice(ps2.trail_flat, last_start, last_end)
+    let lhs = list.get_or(bnf.prod_lhs, p, 0)
+    let node = Inner(lhs, children)
+    if tables.act_is_accept(a) then
+      ok(Tree { leading: ps2.leading, root: node, trailing: new_trail })
     else {
-      let pats = list.map(terms, (tid) => list.get_or(bnf.term_regex, tid, ""))
-      let m = dfa.compile(pats)!
-      list.push(dfa_idx, list.len(machines))
-      list.push(machines, m)
-      list.push(maps, terms)
-      ()
+      let popped_states = list.take(ps2.state_stack, list.len(ps2.state_stack) - k)
+      let st2 = list.get_or(popped_states, list.len(popped_states) - 1, 0)
+      let g = list.get_or(t.goto_t, st2 * list.len(bnf.nt_display) + lhs, 0)
+      guard g != 0 else err("internal: missing goto")
+      let kept = trail_start(ps2, base)
+      let ps3 = PState {
+        state_stack: popped_states + [g - 1],
+        nodes: list.take(ps2.nodes, base) + [node],
+        trail_flat: list.take(ps2.trail_flat, kept) + new_trail,
+        trail_ends: list.take(ps2.trail_ends, base) + [kept + list.len(new_trail)],
+        leading: ps2.leading,
+        pos: ps2.pos,
+      }
+      step(t, lx, bnf, cps, n, ps3)
     }
   }
-  let ex_pats = list.map(bnf.extra_terms, (tid) => list.get_or(bnf.term_regex, tid, ""))
+  else {
+    let tn = if lo.tok == bnf.n_terms then "<eof>" else list.get_or(bnf.term_display, lo.tok, "?")
+    err("parse error at ${int.to_string(lo.pos)}: unexpected '${tn}'")
+  }
+}
+
+// Where node i's trail begins in trail_flat (= the previous node's end).
+fn trail_start(ps: PState, i: Int) -> Int =
+  if i <= 0 then 0 else list.get_or(ps.trail_ends, i - 1, 0)
+
+// Lex one token for parse state `st` at `pos`: try the state's own dfa first
+// (immediate tokens match at the raw position; a non-immediate token after
+// zero skipped extras is the same position anyway), else consume ONE extra
+// (whitespace silently, a named extra as a node) and recurse.
+fn lex_one(
+  lx: Lexers,
+  bnf: normalize.Bnf,
+  cps: List[Int],
+  n: Int,
+  st: Int,
+  pos: Int,
+  acc: List[Cst],
+) -> LexOut = {
+  let di = list.get_or(lx.dfa_idx, st, 0 - 1)
+  let mlen = if di >= 0 and pos < n then scan_len(lx, di, cps, pos) else 0
+  if mlen > 0 then {
+    let mid = scan_id(lx, di, cps, pos)
+    let tok = list.get_or(list.get_or(lx.maps, di, []), mid, 0)
+    LexOut { tok: tok, len: mlen, pos: pos, extras: acc, fail: 0 }
+  }
+  else if pos >= n then
+    LexOut { tok: bnf.n_terms, len: 0, pos: pos, extras: acc, fail: 0 }
+  else {
+    let em = dfa.scan_cps(lx.extras, cps, pos)
+    let elen = match em { some(mm) => mm.len, none => 0 }
+    if elen == 0 then LexOut { tok: 0, len: 0, pos: pos, extras: acc, fail: 1 }
+    else {
+      let eid = match em { some(mm) => mm.id, none => 0 }
+      let ext_term = list.get_or(lx.extra_map, eid, 0)
+      let ext_named = list.get_or(bnf.term_named, ext_term, 0)
+      let acc2 = if ext_named == 1 then acc + [Leaf(ext_term, pos, pos + elen)] else acc
+      lex_one(lx, bnf, cps, n, st, pos + elen, acc2)
+    }
+  }
+}
+
+fn scan_len(lx: Lexers, di: Int, cps: List[Int], pos: Int) -> Int = {
+  let m = dfa.scan_cps(list.get_or(lx.machines, di, lx.extras), cps, pos)
+  match m { some(mm) => mm.len, none => 0 }
+}
+
+fn scan_id(lx: Lexers, di: Int, cps: List[Int], pos: Int) -> Int = {
+  let m = dfa.scan_cps(list.get_or(lx.machines, di, lx.extras), cps, pos)
+  match m { some(mm) => mm.id, none => 0 }
+}
+
+// Extra nodes attach as TRAILING of the node on top of the stack (siblings
+// after whatever just closed), or as document-leading before the first token.
+fn attach_extras(ps: PState, extras: List[Cst]) -> PState =
+  if list.is_empty(extras) then ps
+  else if list.is_empty(ps.nodes) then
+    PState {
+      state_stack: ps.state_stack,
+      nodes: ps.nodes,
+      trail_flat: ps.trail_flat,
+      trail_ends: ps.trail_ends,
+      leading: ps.leading + extras,
+      pos: ps.pos,
+    }
+  else {
+    let last = list.len(ps.trail_ends) - 1
+    let old_end = list.get_or(ps.trail_ends, last, 0)
+    PState {
+      state_stack: ps.state_stack,
+      nodes: ps.nodes,
+      trail_flat: ps.trail_flat + extras,
+      trail_ends: list.take(ps.trail_ends, last) + [old_end + list.len(extras)],
+      leading: ps.leading,
+      pos: ps.pos,
+    }
+  }
+
+// Children of a reduce: nodes[base+i] followed by its trailing extras (except
+// the LAST child's trail, which becomes the new node's own trail). Pure.
+fn collect_children(ps: PState, base: Int, k: Int, i: Int, acc: List[Cst]) -> List[Cst] =
+  if i >= k then acc
+  else {
+    let child = list.get_or(ps.nodes, base + i, Leaf(0, 0, 0))
+    let tl = if i == k - 1 then []
+      else list.slice(ps.trail_flat, trail_start(ps, base + i), list.get_or(ps.trail_ends, base + i, 0))
+    collect_children(ps, base, k, i + 1, acc + [child] + tl)
+  }
+
+fn build_lexers(t: tables.Tables, bnf: normalize.Bnf) -> Result[Lexers, String] = {
+  let acc = lex_states(t, bnf, 0, LexAcc { dfa_idx: [], machines: [], maps: [] })!
+  let ex_pats = term_patterns(bnf, bnf.extra_terms, 0, [])
   let ex = dfa.compile(ex_pats)!
   ok(Lexers {
-    dfa_idx: dfa_idx,
-    machines: machines,
-    maps: maps,
+    dfa_idx: acc.dfa_idx,
+    machines: acc.machines,
+    maps: acc.maps,
     extras: ex,
     extra_map: bnf.extra_terms,
   })
 }
+
+// The three per-state lists under construction.
+type LexAcc = {
+  dfa_idx: List[Int],
+  machines: List[dfa.Dfa],
+  maps: List[List[Int]],
+}
+
+// One dfa per state s.. — valid terminals ordered by (-token prec, id): dfa
+// breaks a length tie by LOWER pattern index, so higher-prec-then-earlier
+// wins, which is tree-sitter's lexical conflict rule. Pure recursion, no
+// lambdas (the defunc route is outside the wasm subset here).
+fn lex_states(t: tables.Tables, bnf: normalize.Bnf, s: Int, acc: LexAcc) -> Result[LexAcc, String] =
+  if s >= t.n_states then ok(acc)
+  else {
+    let terms0 = state_terms(t, bnf, s, 0, [])
+    let terms = sort_terms(bnf, terms0, 0, [])
+    if list.is_empty(terms) then
+      lex_states(t, bnf, s + 1, LexAcc {
+        dfa_idx: acc.dfa_idx + [0 - 1],
+        machines: acc.machines,
+        maps: acc.maps,
+      })
+    else {
+      let pats = term_patterns(bnf, terms, 0, [])
+      let m = dfa.compile(pats)!
+      lex_states(t, bnf, s + 1, LexAcc {
+        dfa_idx: acc.dfa_idx + [list.len(acc.machines)],
+        machines: acc.machines + [m],
+        maps: acc.maps + [terms],
+      })
+    }
+  }
+
+// Terminals with any action in state s, in id order.
+fn state_terms(t: tables.Tables, bnf: normalize.Bnf, s: Int, tid: Int, acc: List[Int]) -> List[Int] =
+  if tid >= bnf.n_terms then acc
+  else {
+    let a = list.get_or(t.action, s * t.n_terms1 + tid, 0)
+    if a != 0 then state_terms(t, bnf, s, tid + 1, acc + [tid])
+    else state_terms(t, bnf, s, tid + 1, acc)
+  }
+
+// Insertion sort by (-prec, id) — term lists are a handful of entries.
+fn sort_terms(bnf: normalize.Bnf, terms: List[Int], i: Int, acc: List[Int]) -> List[Int] =
+  if i >= list.len(terms) then acc
+  else {
+    let tid = list.get_or(terms, i, 0)
+    sort_terms(bnf, terms, i + 1, insert_term(bnf, acc, tid, 0))
+  }
+
+fn term_key(bnf: normalize.Bnf, tid: Int) -> Int =
+  0 - list.get_or(bnf.term_prec, tid, 0) * 100000 + tid
+
+fn insert_term(bnf: normalize.Bnf, acc: List[Int], tid: Int, i: Int) -> List[Int] =
+  if i >= list.len(acc) then acc + [tid]
+  else {
+    let cur = list.get_or(acc, i, 0)
+    if term_key(bnf, tid) < term_key(bnf, cur) then
+      list.take(acc, i) + [tid] + list.drop(acc, i)
+    else insert_term(bnf, acc, tid, i + 1)
+  }
+
+// The regex of each terminal in `terms`, in order.
+fn term_patterns(bnf: normalize.Bnf, terms: List[Int], i: Int, acc: List[String]) -> List[String] =
+  if i >= list.len(terms) then acc
+  else {
+    let tid = list.get_or(terms, i, 0)
+    term_patterns(bnf, terms, i + 1, acc + [list.get_or(bnf.term_regex, tid, "")])
+  }

@@ -4,6 +4,10 @@
 // every grammar repository — never `grammar.js` (see README: executing the DSL
 // is a permanent non-goal). Seven top-level keys; A0 consumes `rules` and
 // `extras` and requires `externals` to be empty.
+//
+// Written in the pure-recursive style (no accumulation loops, every fallible
+// step on its own `let … !` line) — the shape the wasm value subset admits;
+// the same discipline almide/dfa established.
 
 import json
 
@@ -35,29 +39,55 @@ fn read(text: String) -> Result[Grammar, String] = {
   let root = json.parse(text)!
   let rules = value.field(root, "rules")!
   let names = value.keys(rules)
-  var bodies: List[Rule] = []
-  for n in names {
-    let b = read_rule(value.field(rules, n)!)!
-    list.push(bodies, b)
-  }
+  let bodies = read_bodies(rules, names, 0, [])!
   let extras_v = value.field(root, "extras")!
-  var extras: List[Rule] = []
-  for e in value.as_array(extras_v)! {
-    let r = read_rule(e)!
-    list.push(extras, r)
-  }
-  let externals = value.as_array(value.field(root, "externals")!)!
+  let extras_list = value.as_array(extras_v)!
+  let extras = read_list(extras_list, 0, [])!
+  let externals_v = value.field(root, "externals")!
+  let externals = value.as_array(externals_v)!
   guard list.is_empty(externals) else err("external scanners are not supported at this rung")
   ok(Grammar { rule_names: names, rule_bodies: bodies, extras: extras })
 }
 
+// The rule bodies for `names[i..]`, appended to `acc`.
+fn read_bodies(rules: Value, names: List[String], i: Int, acc: List[Rule]) -> Result[List[Rule], String] =
+  if i >= list.len(names) then ok(acc)
+  else {
+    let name = list.get_or(names, i, "")
+    let rv = value.field(rules, name)!
+    let r = read_rule(rv)!
+    read_bodies(rules, names, i + 1, acc + [r])
+  }
+
+// Each element of a JSON array as a Rule, appended to `acc`.
+fn read_list(vs: List[Value], i: Int, acc: List[Rule]) -> Result[List[Rule], String] =
+  if i >= list.len(vs) then ok(acc)
+  else {
+    let v = list.get_or(vs, i, value.null())
+    let r = read_rule(v)!
+    read_list(vs, i + 1, acc + [r])
+  }
+
 // One tagged rule object → Rule. Unknown tags are an error, not a guess.
 fn read_rule(v: Value) -> Result[Rule, String] = {
-  let t = value.as_string(value.field(v, "type")!)!
+  let tv = value.field(v, "type")!
+  let t = value.as_string(tv)!
   match t {
-    "SYMBOL" => ok(RSym(value.as_string(value.field(v, "name")!)!)),
-    "STRING" => ok(RStr(value.as_string(value.field(v, "value")!)!)),
-    "PATTERN" => ok(RPat(value.as_string(value.field(v, "value")!)!)),
+    "SYMBOL" => {
+      let nv = value.field(v, "name")!
+      let name = value.as_string(nv)!
+      ok(RSym(name))
+    },
+    "STRING" => {
+      let sv = value.field(v, "value")!
+      let s = value.as_string(sv)!
+      ok(RStr(s))
+    },
+    "PATTERN" => {
+      let pv = value.field(v, "value")!
+      let p = value.as_string(pv)!
+      ok(RPat(p))
+    },
     "BLANK" => ok(RBlank),
     "SEQ" => {
       let ms = read_members(v)!
@@ -88,13 +118,16 @@ fn read_rule(v: Value) -> Result[Rule, String] = {
     "PREC_RIGHT" => read_prec(v),
     "PREC_DYNAMIC" => read_prec(v),
     "FIELD" => {
-      let name = value.as_string(value.field(v, "name")!)!
+      let nv = value.field(v, "name")!
+      let name = value.as_string(nv)!
       let c = read_content(v)!
       ok(RField(name, c))
     },
     "ALIAS" => {
-      let name = value.as_string(value.field(v, "value")!)!
-      let named = value.as_bool(value.field(v, "named")!)!
+      let nv = value.field(v, "value")!
+      let name = value.as_string(nv)!
+      let bv = value.field(v, "named")!
+      let named = value.as_bool(bv)!
       let c = read_content(v)!
       ok(RAlias(name, named, c))
     },
@@ -104,23 +137,24 @@ fn read_rule(v: Value) -> Result[Rule, String] = {
 
 // The `members` array of a SEQ/CHOICE.
 fn read_members(v: Value) -> Result[List[Rule], String] = {
-  var out: List[Rule] = []
-  for m in value.as_array(value.field(v, "members")!)! {
-    let r = read_rule(m)!
-    list.push(out, r)
-  }
-  ok(out)
+  let mv = value.field(v, "members")!
+  let ms = value.as_array(mv)!
+  read_list(ms, 0, [])
 }
 
 // The `content` child of the single-child wrappers.
-fn read_content(v: Value) -> Result[Rule, String] = read_rule(value.field(v, "content")!)
+fn read_content(v: Value) -> Result[Rule, String] = {
+  let cv = value.field(v, "content")!
+  read_rule(cv)
+}
 
 // PREC/PREC_LEFT/PREC_RIGHT/PREC_DYNAMIC collapse to the value + content at
 // this rung: json's only precedence is lexical (inside a TOKEN), where the
 // value orders tokenization; assoc distinctions only matter once a grammar
 // declares conflicts (A2+).
 fn read_prec(v: Value) -> Result[Rule, String] = {
-  let p = value.as_int(value.field(v, "value")!) ?? 0
+  let pv = value.field(v, "value")!
+  let p = value.as_int(pv) ?? 0
   let c = read_content(v)!
   ok(RPrec(p, c))
 }

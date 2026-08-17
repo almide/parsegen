@@ -16,7 +16,7 @@ Everything here is pure table generation. Real languages of up to 182 rules are 
 
 | | grammar | rules | ext | conf | scanner | pat | new capability | conformance |
 |---|---|---:|---:|---:|---:|---:|---|---|
-| **A0** | json | 14 | 0 | 0 | 0 | 12 | `grammar.json` → LALR → LR runtime | **6/6** (native; wasm walls upstream) |
+| **A0** | json | 14 | 0 | 0 | 0 | 12 | `grammar.json` → LALR → LR runtime | **6/6, native + wasm, parity** |
 | A1 | clojure | 46 | 0 | 0 | 0 | 53 | pattern compilation under load | — |
 | **A2** | zig | 108 | 0 | **6** | 0 | 44 | **conflict resolution / GLR** | — |
 | A3 | go | 116 | 0 | 8 | 0 | 111 | production-scale grammar | — |

@@ -7,10 +7,11 @@
 // nonterminals, REPEAT expanding LEFT-recursively (constant LR stack):
 // R → ε | R x.
 //
-// Deliberately Map-free and tuple-free: interning is a parallel key list with
-// linear lookup (grammars are small — typescript, the summit, has ~300
-// symbols), and every structure is a flat parallel list — the WASM-subset
-// lessons from almide/dfa.
+// PURE-RECURSIVE on purpose: the builder is threaded by VALUE (spread-record
+// updates, list `+` appends, index recursion instead of accumulation loops) —
+// no `mut` params, no heap reassignment in loop frames. This is the style the
+// wasm value subset admits end-to-end, the discipline almide/dfa established;
+// interning stays a parallel key list with linear lookup (grammars are small).
 
 import self.grammar
 import self.retext
@@ -36,8 +37,8 @@ type Bnf = {
   start_nt: Int,
 }
 
-// Interning state threaded by mutable reference. `term_keys` is the dedup
-// key list parallel to the term data ("n:<rule>", "s:<literal>", "p:<regex>").
+// The interning state, threaded by value. `term_keys` is the dedup key list
+// parallel to the term data ("n:<rule>", "s:<literal>", "p:<regex>").
 type Build = {
   term_keys: List[String],
   term_display: List[String],
@@ -53,63 +54,88 @@ type Build = {
   n_synth: Int,
 }
 
+// A Build paired with the id a step produced.
+type WithId = { b: Build, id: Int }
+
+// A Build paired with the sequence being assembled.
+type WithSeq = { b: Build, rhs: List[Int], fields: List[String] }
+
+// A Build paired with collected extra terminal ids.
+type WithExtras = { b: Build, terms: List[Int] }
+
 fn build(g: grammar.Grammar) -> Result[Bnf, String] = {
-  var b = Build {
+  let b0 = Build {
     term_keys: [], term_display: [], term_regex: [], term_named: [],
     term_immediate: [], term_prec: [], nt_display: [], nt_hidden: [],
     prod_lhs: [], prod_rhs: [], prod_fields: [], n_synth: 0,
   }
-  // Pass 1 — classify every declared rule. Lexical rules intern their named
-  // terminals NOW, in rule order; syntactic rules claim nonterminal slots.
-  let n = list.len(g.rule_names)
-  for i in 0..<n {
+  let b1 = pass1(g, 0, b0)!
+  let b2 = pass2(g, 0, b1)!
+  let we = extras_rec(g, 0, WithExtras { b: b2, terms: [] })!
+  let b3 = we.b
+  let nt0 = list.get_or(g.rule_names, 0, "")
+  ok(Bnf {
+    n_terms: list.len(b3.term_display),
+    term_display: b3.term_display,
+    term_regex: b3.term_regex,
+    term_named: b3.term_named,
+    term_immediate: b3.term_immediate,
+    term_prec: b3.term_prec,
+    nt_display: b3.nt_display,
+    nt_hidden: b3.nt_hidden,
+    prod_lhs: b3.prod_lhs,
+    prod_rhs: b3.prod_rhs,
+    prod_fields: b3.prod_fields,
+    extra_terms: we.terms,
+    start_nt: list.index_of(b3.nt_display, nt0) ?? 0,
+  })
+}
+
+// Pass 1 — classify rule i.. : lexical rules intern their named terminals (in
+// rule order — dfa breaks ties by lower id); syntactic rules claim nt slots.
+fn pass1(g: grammar.Grammar, i: Int, b: Build) -> Result[Build, String] =
+  if i >= list.len(g.rule_names) then ok(b)
+  else {
     let name = list.get_or(g.rule_names, i, "")
     let body = list.get_or(g.rule_bodies, i, grammar.RBlank)
     if is_lexical(body) then {
       let rx = retext.of_rule(body)!
-      let _ = intern_term(b, "n:" + name, name, rx, named_rule(name), top_immediate(body), top_prec(body))
-      ()
+      let w = intern_term(b, "n:" + name, name, rx, named_rule(name), top_immediate(body), top_prec(body))
+      pass1(g, i + 1, w.b)
     }
     else {
-      list.push(b.nt_display, name)
-      list.push(b.nt_hidden, if named_rule(name) then 0 else 1)
-      ()
+      let b2 = Build {
+        ...b,
+        nt_display: b.nt_display + [name],
+        nt_hidden: b.nt_hidden + [if named_rule(name) then 0 else 1],
+      }
+      pass1(g, i + 1, b2)
     }
   }
-  // Pass 2 — productions for every syntactic rule.
-  for i in 0..<n {
+
+// Pass 2 — productions for every syntactic rule.
+fn pass2(g: grammar.Grammar, i: Int, b: Build) -> Result[Build, String] =
+  if i >= list.len(g.rule_names) then ok(b)
+  else {
     let name = list.get_or(g.rule_names, i, "")
     let body = list.get_or(g.rule_bodies, i, grammar.RBlank)
-    if not is_lexical(body) then {
+    if is_lexical(body) then pass2(g, i + 1, b)
+    else {
       let lhs = list.index_of(b.nt_display, name) ?? 0
-      add_alternatives(b, lhs, body)!
+      let b2 = add_alternatives(b, lhs, body)!
+      pass2(g, i + 1, b2)
     }
-    else ()
   }
-  // Extras: a SYMBOL names a lexical rule's terminal; a bare pattern becomes
-  // an unnamed terminal (whitespace — skipped, never in the tree).
-  var extra_terms: List[Int] = []
-  for e in g.extras {
-    let t = extra_term(b, e)!
-    list.push(extra_terms, t)
+
+// Extras i.. : a SYMBOL names a lexical rule's terminal; a bare pattern
+// becomes an unnamed terminal (whitespace — skipped, never in the tree).
+fn extras_rec(g: grammar.Grammar, i: Int, we: WithExtras) -> Result[WithExtras, String] =
+  if i >= list.len(g.extras) then ok(we)
+  else {
+    let e = list.get_or(g.extras, i, grammar.RBlank)
+    let w = extra_term(we.b, e)!
+    extras_rec(g, i + 1, WithExtras { b: w.b, terms: we.terms + [w.id] })
   }
-  let nt0 = list.get_or(g.rule_names, 0, "")
-  ok(Bnf {
-    n_terms: list.len(b.term_display),
-    term_display: b.term_display,
-    term_regex: b.term_regex,
-    term_named: b.term_named,
-    term_immediate: b.term_immediate,
-    term_prec: b.term_prec,
-    nt_display: b.nt_display,
-    nt_hidden: b.nt_hidden,
-    prod_lhs: b.prod_lhs,
-    prod_rhs: b.prod_rhs,
-    prod_fields: b.prod_fields,
-    extra_terms: extra_terms,
-    start_nt: list.index_of(b.nt_display, nt0) ?? 0,
-  })
-}
 
 // ── classification ─────────────────────────────────
 
@@ -148,182 +174,165 @@ fn top_prec(r: grammar.Rule) -> Int = match r {
 
 // ── interning ──────────────────────────────────────
 
-// Intern a terminal under `key`, returning its id. The attributes stick from
-// the FIRST interning (a rule's own definition runs before any reference).
+// Intern a terminal under `key`. The attributes stick from the FIRST
+// interning (a rule's own definition runs before any reference). Pure: the
+// updated Build rides back with the id.
 fn intern_term(
-  mut b: Build,
+  b: Build,
   key: String,
   display: String,
   regex: String,
   named: Bool,
   immediate: Bool,
   prec: Int,
-) -> Int = {
-  match list.index_of(b.term_keys, key) {
-    some(id) => id,
-    none => {
-      let id = list.len(b.term_keys)
-      list.push(b.term_keys, key)
-      list.push(b.term_display, display)
-      list.push(b.term_regex, regex)
-      list.push(b.term_named, if named then 1 else 0)
-      list.push(b.term_immediate, if immediate then 1 else 0)
-      list.push(b.term_prec, prec)
-      id
-    },
+) -> WithId = {
+  if list.contains(b.term_keys, key) then
+    WithId { b: b, id: list.index_of(b.term_keys, key) ?? 0 }
+  else {
+    let id = list.len(b.term_keys)
+    let b2 = Build {
+      ...b,
+      term_keys: b.term_keys + [key],
+      term_display: b.term_display + [display],
+      term_regex: b.term_regex + [regex],
+      term_named: b.term_named + [if named then 1 else 0],
+      term_immediate: b.term_immediate + [if immediate then 1 else 0],
+      term_prec: b.term_prec + [prec],
+    }
+    WithId { b: b2, id: id }
   }
 }
 
-fn fresh_synth(mut b: Build) -> Int = {
+fn fresh_synth(b: Build) -> WithId = {
   let idx = list.len(b.nt_display)
-  list.push(b.nt_display, "_syn" + int.to_string(b.n_synth))
-  list.push(b.nt_hidden, 1)
-  b.n_synth = b.n_synth + 1
-  idx
+  let b2 = Build {
+    ...b,
+    nt_display: b.nt_display + ["_syn" + int.to_string(b.n_synth)],
+    nt_hidden: b.nt_hidden + [1],
+    n_synth: b.n_synth + 1,
+  }
+  WithId { b: b2, id: idx }
 }
 
-fn add_prod(mut b: Build, lhs: Int, rhs: List[Int], fields: List[String]) -> Unit = {
-  list.push(b.prod_lhs, lhs)
-  list.push(b.prod_rhs, rhs)
-  list.push(b.prod_fields, fields)
-  ()
-}
+fn add_prod(b: Build, lhs: Int, rhs: List[Int], fields: List[String]) -> Build =
+  Build {
+    ...b,
+    prod_lhs: b.prod_lhs + [lhs],
+    prod_rhs: b.prod_rhs + [rhs],
+    prod_fields: b.prod_fields + [fields],
+  }
 
 // ── production construction ────────────────────────
 
 // Top-level alternatives: CHOICE splits, BLANK is the empty production,
 // everything else is one sequence.
-fn add_alternatives(mut b: Build, lhs: Int, body: grammar.Rule) -> Result[Unit, String] = {
+fn add_alternatives(b: Build, lhs: Int, body: grammar.Rule) -> Result[Build, String] =
   match body {
-    grammar.RChoice(ms) => {
-      for m in ms {
-        add_one_alt(b, lhs, m)!
-      }
-      ok(())
-    },
+    grammar.RChoice(ms) => alts_rec(b, lhs, ms, 0),
     other => add_one_alt(b, lhs, other),
   }
+
+fn alts_rec(b: Build, lhs: Int, ms: List[grammar.Rule], i: Int) -> Result[Build, String] =
+  if i >= list.len(ms) then ok(b)
+  else {
+    let m = list.get_or(ms, i, grammar.RBlank)
+    let b2 = add_one_alt(b, lhs, m)!
+    alts_rec(b2, lhs, ms, i + 1)
+  }
+
+fn add_one_alt(b: Build, lhs: Int, alt: grammar.Rule) -> Result[Build, String] = {
+  let w = seq_into(WithSeq { b: b, rhs: [], fields: [] }, alt, "")!
+  ok(add_prod(w.b, lhs, w.rhs, w.fields))
 }
 
-fn add_one_alt(mut b: Build, lhs: Int, alt: grammar.Rule) -> Result[Unit, String] = {
-  var rhs: List[Int] = []
-  var fields: List[String] = []
-  seq_into(b, alt, "", rhs, fields)!
-  add_prod(b, lhs, rhs, fields)
-  ok(())
-}
-
-// Append `r`'s symbols to the sequence being built; `field` labels what this
+// Append `r`'s symbols to the sequence in `w`; `field` labels what this
 // subtree contributes.
-fn seq_into(
-  mut b: Build,
-  r: grammar.Rule,
-  field: String,
-  mut rhs: List[Int],
-  mut fields: List[String],
-) -> Result[Unit, String] = {
+fn seq_into(w: WithSeq, r: grammar.Rule, field: String) -> Result[WithSeq, String] =
   match r {
-    grammar.RBlank => ok(()),
-    grammar.RSeq(ms) => {
-      for m in ms {
-        seq_into(b, m, field, rhs, fields)!
-      }
-      ok(())
-    },
-    grammar.RField(f, inner) => seq_into(b, inner, f, rhs, fields),
-    grammar.RPrec(_, inner) => seq_into(b, inner, field, rhs, fields),
+    grammar.RBlank => ok(w),
+    grammar.RSeq(ms) => seq_list(w, ms, 0, field),
+    grammar.RField(f, inner) => seq_into(w, inner, f),
+    grammar.RPrec(_, inner) => seq_into(w, inner, field),
     grammar.RSym(name) => {
-      let sym = symbol_id(b, name)!
-      push_sym(rhs, fields, sym, field)
-      ok(())
+      let sym = symbol_id(w.b, name)!
+      ok(push_sym(w, sym, field))
     },
     grammar.RStr(s) => {
-      let id = intern_term(b, "s:" + s, s, retext.quote(s), false, false, 0)
-      push_sym(rhs, fields, id, field)
-      ok(())
+      let wi = intern_term(w.b, "s:" + s, s, retext.quote(s), false, false, 0)
+      ok(push_sym(WithSeq { b: wi.b, rhs: w.rhs, fields: w.fields }, wi.id, field))
     },
     grammar.RPat(p) => {
-      let rx = retext.fix_dots(p)
-      let id = intern_term(b, "p:" + p, p, rx, false, false, 0)
-      push_sym(rhs, fields, id, field)
-      ok(())
+      let wi = intern_term(w.b, "p:" + p, p, retext.fix_dots(p), false, false, 0)
+      ok(push_sym(WithSeq { b: wi.b, rhs: w.rhs, fields: w.fields }, wi.id, field))
     },
     grammar.RToken(inner) => {
       let rx = retext.of_rule(inner)!
-      let id = intern_term(b, "p:" + rx, rx, rx, false, false, top_prec(inner))
-      push_sym(rhs, fields, id, field)
-      ok(())
+      let wi = intern_term(w.b, "p:" + rx, rx, rx, false, false, top_prec(inner))
+      ok(push_sym(WithSeq { b: wi.b, rhs: w.rhs, fields: w.fields }, wi.id, field))
     },
     grammar.RImmediate(inner) => {
       let rx = retext.of_rule(inner)!
-      let id = intern_term(b, "p:" + rx, rx, rx, false, true, top_prec(inner))
-      push_sym(rhs, fields, id, field)
-      ok(())
+      let wi = intern_term(w.b, "p:" + rx, rx, rx, false, true, top_prec(inner))
+      ok(push_sym(WithSeq { b: wi.b, rhs: w.rhs, fields: w.fields }, wi.id, field))
     },
     grammar.RChoice(_) => {
-      let s = fresh_synth(b)
-      add_alternatives(b, s, r)!
-      push_sym(rhs, fields, NT_BASE + s, field)
-      ok(())
+      let ws = fresh_synth(w.b)
+      let b2 = add_alternatives(ws.b, ws.id, r)!
+      ok(push_sym(WithSeq { b: b2, rhs: w.rhs, fields: w.fields }, NT_BASE + ws.id, field))
     },
     grammar.RRepeat(inner) => {
       // R → ε | R x
-      let s = fresh_synth(b)
-      add_prod(b, s, [], [])
-      add_rep_step(b, s, inner)!
-      push_sym(rhs, fields, NT_BASE + s, field)
-      ok(())
+      let ws = fresh_synth(w.b)
+      let b2 = add_prod(ws.b, ws.id, [], [])
+      let b3 = add_rep_step(b2, ws.id, inner)!
+      ok(push_sym(WithSeq { b: b3, rhs: w.rhs, fields: w.fields }, NT_BASE + ws.id, field))
     },
     grammar.RRepeat1(inner) => {
       // R → x | R x
-      let s = fresh_synth(b)
-      var first: List[Int] = []
-      var ffields: List[String] = []
-      seq_into(b, inner, "", first, ffields)!
-      add_prod(b, s, first, ffields)
-      add_rep_step(b, s, inner)!
-      push_sym(rhs, fields, NT_BASE + s, field)
-      ok(())
+      let ws = fresh_synth(w.b)
+      let wf = seq_into(WithSeq { b: ws.b, rhs: [], fields: [] }, inner, "")!
+      let b2 = add_prod(wf.b, ws.id, wf.rhs, wf.fields)
+      let b3 = add_rep_step(b2, ws.id, inner)!
+      ok(push_sym(WithSeq { b: b3, rhs: w.rhs, fields: w.fields }, NT_BASE + ws.id, field))
     },
     grammar.RAlias(_, _, _) => err("ALIAS is not needed by this rung"),
   }
-}
+
+fn seq_list(w: WithSeq, ms: List[grammar.Rule], i: Int, field: String) -> Result[WithSeq, String] =
+  if i >= list.len(ms) then ok(w)
+  else {
+    let m = list.get_or(ms, i, grammar.RBlank)
+    let w2 = seq_into(w, m, field)!
+    seq_list(w2, ms, i + 1, field)
+  }
 
 // The left-recursive step production `R → R x` shared by both repeat forms.
-fn add_rep_step(mut b: Build, s: Int, inner: grammar.Rule) -> Result[Unit, String] = {
-  var rrhs: List[Int] = [NT_BASE + s]
-  var rfields: List[String] = [""]
-  seq_into(b, inner, "", rrhs, rfields)!
-  add_prod(b, s, rrhs, rfields)
-  ok(())
+fn add_rep_step(b: Build, s: Int, inner: grammar.Rule) -> Result[Build, String] = {
+  let w = seq_into(WithSeq { b: b, rhs: [NT_BASE + s], fields: [""] }, inner, "")!
+  ok(add_prod(w.b, s, w.rhs, w.fields))
 }
 
-fn push_sym(mut rhs: List[Int], mut fields: List[String], sym: Int, field: String) -> Unit = {
-  list.push(rhs, sym)
-  list.push(fields, field)
-  ()
-}
+fn push_sym(w: WithSeq, sym: Int, field: String) -> WithSeq =
+  WithSeq { b: w.b, rhs: w.rhs + [sym], fields: w.fields + [field] }
 
 // A SYMBOL reference: a lexical rule's terminal id, or NT_BASE + nonterminal.
 fn symbol_id(b: Build, name: String) -> Result[Int, String] = {
-  match list.index_of(b.term_keys, "n:" + name) {
-    some(t) => ok(t),
-    none => match list.index_of(b.nt_display, name) {
-      some(ntv) => ok(NT_BASE + ntv),
-      none => err("undefined symbol '${name}'"),
-    },
-  }
+  if list.contains(b.term_keys, "n:" + name) then
+    ok(list.index_of(b.term_keys, "n:" + name) ?? 0)
+  else if list.contains(b.nt_display, name) then
+    ok(NT_BASE + (list.index_of(b.nt_display, name) ?? 0))
+  else err("undefined symbol '${name}'")
 }
 
-// An extras entry → its terminal id.
-fn extra_term(mut b: Build, e: grammar.Rule) -> Result[Int, String] = {
+// An extras entry → its terminal id (with the Build it may have grown).
+fn extra_term(b: Build, e: grammar.Rule) -> Result[WithId, String] =
   match e {
-    grammar.RSym(name) => match list.index_of(b.term_keys, "n:" + name) {
-      some(t) => ok(t),
-      none => err("extra symbol '${name}' is not a lexical rule"),
+    grammar.RSym(name) => {
+      if list.contains(b.term_keys, "n:" + name) then
+        ok(WithId { b: b, id: list.index_of(b.term_keys, "n:" + name) ?? 0 })
+      else err("extra symbol '${name}' is not a lexical rule")
     },
     grammar.RPat(p) => ok(intern_term(b, "p:" + p, p, retext.fix_dots(p), false, false, 0)),
     grammar.RStr(s) => ok(intern_term(b, "s:" + s, s, retext.quote(s), false, false, 0)),
     _ => err("unsupported extras shape"),
   }
-}

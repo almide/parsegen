@@ -2,58 +2,45 @@
 // single-line form: named nodes only, hidden rules and synthetic nonterminals
 // spliced into their parent, anonymous terminals dropped.
 //
-// (Field labels are tracked in the Bnf but not printed at this rung — the json
-// corpus's own expectations omit them; the rung that needs them will add the
-// label pass.)
+// PURE-RECURSIVE (returns the parts list instead of mutating one) — the wasm
+// value-subset discipline. (Field labels are tracked in the Bnf but not
+// printed at this rung — the json corpus's own expectations omit them.)
 
 import self.normalize
 import self.parse
 
 fn render(bnf: normalize.Bnf, tree: parse.Tree) -> String = {
-  var parts: List[String] = []
-  for x in tree.leading {
-    emit_into(bnf, x, parts)
-  }
-  emit_into(bnf, tree.root, parts)
-  for x in tree.trailing {
-    emit_into(bnf, x, parts)
-  }
-  list.join(parts, " ")
+  let a = emit_list(bnf, tree.leading, 0, [])
+  let b = emit_node(bnf, tree.root, a)
+  let c = emit_list(bnf, tree.trailing, 0, b)
+  list.join(c, " ")
 }
 
+// Append each node of `xs[i..]` to `parts`.
+fn emit_list(bnf: normalize.Bnf, xs: List[parse.Cst], i: Int, parts: List[String]) -> List[String] =
+  if i >= list.len(xs) then parts
+  else {
+    let x = list.get_or(xs, i, parse.Leaf(0, 0, 0))
+    let parts2 = emit_node(bnf, x, parts)
+    emit_list(bnf, xs, i + 1, parts2)
+  }
+
 // Append `node`'s rendering (zero or more parenthesized names) to `parts`.
-fn emit_into(bnf: normalize.Bnf, node: parse.Cst, mut parts: List[String]) -> Unit = {
+fn emit_node(bnf: normalize.Bnf, node: parse.Cst, parts: List[String]) -> List[String] =
   match node {
     parse.Leaf(term, _, _) => {
-      if list.get_or(bnf.term_named, term, 0) == 1 then {
-        list.push(parts, "(" + list.get_or(bnf.term_display, term, "?") + ")")
-        ()
-      }
-      else ()
+      let named = list.get_or(bnf.term_named, term, 0)
+      if named == 1 then parts + ["(" + list.get_or(bnf.term_display, term, "?") + ")"]
+      else parts
     },
     parse.Inner(nt, children) => {
-      if list.get_or(bnf.nt_hidden, nt, 1) == 1 then {
-        for c in children {
-          emit_into(bnf, c, parts)
-        }
-        ()
-      }
+      let hidden = list.get_or(bnf.nt_hidden, nt, 1)
+      if hidden == 1 then emit_list(bnf, children, 0, parts)
       else {
-        var inner: List[String] = []
-        for c in children {
-          emit_into(bnf, c, inner)
-        }
+        let inner = emit_list(bnf, children, 0, [])
         let name = list.get_or(bnf.nt_display, nt, "?")
-        if list.is_empty(inner) then {
-          list.push(parts, "(" + name + ")")
-          ()
-        }
-        else {
-          list.push(parts, "(" + name + " " + list.join(inner, " ") + ")")
-          ()
-        }
+        if list.is_empty(inner) then parts + ["(" + name + ")"]
+        else parts + ["(" + name + " " + list.join(inner, " ") + ")"]
       }
     },
   }
-  ()
-}
