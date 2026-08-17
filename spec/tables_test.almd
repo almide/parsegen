@@ -1,0 +1,26 @@
+import self.grammar
+import self.normalize
+import self.tables
+import self.fixtures_json as fx
+
+fn json_tables() -> Result[tables.Tables, String] = {
+  let g = grammar.read(fx.grammar_json())!
+  let b = normalize.build(g)!
+  tables.build(b)
+}
+
+test "SLR tables build clean for json" {
+  match json_tables() {
+    ok(t) => {
+      assert(t.n_states > 10)
+      assert(t.n_states < 200)
+      assert_eq(list.len(t.action), t.n_states * t.n_terms1)
+      // State 0 must shift or reduce on something.
+      assert(list.any(list.take(t.action, t.n_terms1), (a) => a != 0))
+    },
+    err(e) => {
+      println("ERR: ${e}")
+      assert(false)
+    },
+  }
+}

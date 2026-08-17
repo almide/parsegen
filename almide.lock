@@ -1,0 +1,3 @@
+# almide.lock — auto-generated, do not edit
+
+dfa = { git = "https://github.com/almide/dfa", ref = "v0.1.0", commit = "f5c4784558a0c1ab18e7ae8f79627bfbdb82921c" }

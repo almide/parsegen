@@ -1,0 +1,372 @@
+// tables.almd — Bnf → SLR(1) ACTION/GOTO tables.
+//
+// LR(0) canonical collection + FOLLOW-gated reductions. json (and the rest of
+// ladder phase A up to its conflict rungs) is SLR-clean; a conflict is an
+// honest error here, never a silent resolution — resolution policy arrives
+// with the A2 rung, driven by grammars that declare it.
+//
+// Encodings (all flat):
+//   item        = prod * 64 + dot           (no rhs is 64 long)
+//   ACTION cell = 0 error | 2+s shift-to-s | RED_BASE+p reduce-p
+//                 | ACC_BASE+p accept (reduce p, then stop)
+//   ACTION row  = n_terms + 1 wide (the last column is EOF)
+//   GOTO row    = n_nts wide, cell = 1+s (0 = error)
+
+import self.normalize
+
+let RED_BASE = 500000
+let ACC_BASE = 900000
+
+type Tables = {
+  n_states: Int,
+  n_terms1: Int,
+  action: List[Int],
+  goto_t: List[Int],
+}
+
+fn act_is_shift(a: Int) -> Bool = a >= 2 and a < RED_BASE
+fn act_shift_state(a: Int) -> Int = a - 2
+fn act_is_reduce(a: Int) -> Bool = a >= RED_BASE and a < ACC_BASE
+fn act_reduce_prod(a: Int) -> Int = a - RED_BASE
+fn act_is_accept(a: Int) -> Bool = a >= ACC_BASE
+fn act_accept_prod(a: Int) -> Int = a - ACC_BASE
+
+fn build(bnf: normalize.Bnf) -> Result[Tables, String] = {
+  let n_nts = list.len(bnf.nt_display)
+  let n_prods = list.len(bnf.prod_lhs)
+  let eof = bnf.n_terms
+  let nullable = compute_nullable(bnf, n_nts)
+  let first = compute_first(bnf, nullable)
+  let follow = compute_follow(bnf, n_nts, nullable, first, eof)
+  // ── canonical LR(0) collection ───────────────────
+  // State 0 = closure of every start production's item; accept = a completed
+  // start production under EOF (the augmented S' is implicit).
+  var states: List[List[Int]] = []
+  var state_keys: List[String] = []
+  var start_items: List[Int] = []
+  for p in 0..<n_prods {
+    if list.get_or(bnf.prod_lhs, p, 0 - 1) == bnf.start_nt then {
+      list.push(start_items, p * 64)
+      ()
+    }
+    else ()
+  }
+  let s0 = closure(bnf, start_items)
+  list.push(states, s0)
+  list.push(state_keys, items_key(s0))
+  var action: List[Int] = []
+  var goto_t: List[Int] = []
+  var si = 0
+  while si < list.len(states) {
+    let items = list.get_or(states, si, [])
+    // Zero-fill this state's rows before writing them.
+    while list.len(action) < (si + 1) * (eof + 1) {
+      list.push(action, 0)
+    }
+    while list.len(goto_t) < (si + 1) * n_nts {
+      list.push(goto_t, 0)
+    }
+    let syms = dotted_symbols(bnf, items)
+    for s in syms {
+      let moved = advance_items(bnf, items, s)
+      let target_items = closure(bnf, moved)
+      let key = items_key(target_items)
+      let target = match list.index_of(state_keys, key) {
+        some(existing) => existing,
+        none => {
+          list.push(states, target_items)
+          list.push(state_keys, key)
+          list.len(states) - 1
+        },
+      }
+      if normalize.sym_is_nt(s) then {
+        goto_t[si * n_nts + normalize.sym_nt(s)] = 1 + target
+        ()
+      }
+      else {
+        action[si * (eof + 1) + s] = 2 + target
+        ()
+      }
+    }
+    add_reductions(bnf, items, si, eof, follow, action)!
+    si = si + 1
+  }
+  ok(Tables {
+    n_states: list.len(states),
+    n_terms1: eof + 1,
+    action: action,
+    goto_t: goto_t,
+  })
+}
+
+// Every distinct symbol that appears just after a dot in `items`.
+fn dotted_symbols(bnf: normalize.Bnf, items: List[Int]) -> List[Int] = {
+  var syms: List[Int] = []
+  for it in items {
+    let p = it / 64
+    let dot = it % 64
+    let rhs = list.get_or(bnf.prod_rhs, p, [])
+    if dot < list.len(rhs) then {
+      let s = list.get_or(rhs, dot, 0)
+      if not list.contains(syms, s) then {
+        list.push(syms, s)
+        ()
+      }
+      else ()
+    }
+    else ()
+  }
+  syms
+}
+
+// The kernel of goto(items, s): each item whose dot precedes `s`, advanced.
+fn advance_items(bnf: normalize.Bnf, items: List[Int], s: Int) -> List[Int] = {
+  var moved: List[Int] = []
+  for it in items {
+    let p = it / 64
+    let dot = it % 64
+    let rhs = list.get_or(bnf.prod_rhs, p, [])
+    if dot < list.len(rhs) and list.get_or(rhs, dot, 0 - 1) == s then {
+      list.push(moved, p * 64 + dot + 1)
+      ()
+    }
+    else ()
+  }
+  moved
+}
+
+// Completed items reduce on FOLLOW(lhs); a completed start production accepts
+// on EOF. A collision is a hard error — SLR must be clean at this rung.
+fn add_reductions(
+  bnf: normalize.Bnf,
+  items: List[Int],
+  si: Int,
+  eof: Int,
+  follow: List[List[Int]],
+  mut action: List[Int],
+) -> Result[Unit, String] = {
+  for it in items {
+    let p = it / 64
+    let dot = it % 64
+    let rhs = list.get_or(bnf.prod_rhs, p, [])
+    if dot == list.len(rhs) then {
+      let lhs = list.get_or(bnf.prod_lhs, p, 0)
+      for t in list.get_or(follow, lhs, []) {
+        let cell = si * (eof + 1) + t
+        let old = list.get_or(action, cell, 0)
+        // Accept still PERFORMS the start reduce (the root node must be built)
+        // and then stops — encoded as its own base.
+        let new_act = if lhs == bnf.start_nt and t == eof then ACC_BASE + p else RED_BASE + p
+        if old == 0 then {
+          action[cell] = new_act
+          ()
+        }
+        else if old == new_act then ()
+        else {
+          let kind = if act_is_shift(old) then "shift/reduce" else "reduce/reduce"
+          let tn = if t == eof then "<eof>" else list.get_or(bnf.term_display, t, "?")
+          err("SLR conflict (${kind}) in state ${int.to_string(si)} on '${tn}'")!
+          ()
+        }
+      }
+      ()
+    }
+    else ()
+  }
+  ok(())
+}
+
+// ── closure ────────────────────────────────────────
+
+// LR(0) closure: the dot before a nonterminal pulls in that nonterminal's
+// productions at dot 0. Sorted, so the key is canonical.
+fn closure(bnf: normalize.Bnf, seed: List[Int]) -> List[Int] = {
+  var items = list.unique(seed)
+  var i = 0
+  while i < list.len(items) {
+    let it = list.get_or(items, i, 0)
+    let p = it / 64
+    let dot = it % 64
+    let rhs = list.get_or(bnf.prod_rhs, p, [])
+    if dot < list.len(rhs) then {
+      let s = list.get_or(rhs, dot, 0)
+      if normalize.sym_is_nt(s) then {
+        let nt = normalize.sym_nt(s)
+        let n_prods = list.len(bnf.prod_lhs)
+        for q in 0..<n_prods {
+          if list.get_or(bnf.prod_lhs, q, 0 - 1) == nt then {
+            if not list.contains(items, q * 64) then {
+              list.push(items, q * 64)
+              ()
+            }
+            else ()
+          }
+          else ()
+        }
+        ()
+      }
+      else ()
+    }
+    else ()
+    i = i + 1
+  }
+  list.sort(items)
+}
+
+fn items_key(items: List[Int]) -> String =
+  list.join(list.map(items, (i) => int.to_string(i)), ",")
+
+// ── NULLABLE / FIRST / FOLLOW ──────────────────────
+
+fn compute_nullable(bnf: normalize.Bnf, n_nts: Int) -> List[Int] = {
+  var nullable = list.repeat(0, n_nts)
+  var changed = true
+  while changed {
+    changed = false
+    let n_prods = list.len(bnf.prod_lhs)
+    for p in 0..<n_prods {
+      let lhs = list.get_or(bnf.prod_lhs, p, 0)
+      if list.get_or(nullable, lhs, 0) == 0 then {
+        let rhs = list.get_or(bnf.prod_rhs, p, [])
+        let all_null = list.all(rhs, (s) =>
+          normalize.sym_is_nt(s) and list.get_or(nullable, normalize.sym_nt(s), 0) == 1)
+        if all_null then {
+          nullable[lhs] = 1
+          changed = true
+          ()
+        }
+        else ()
+      }
+      else ()
+    }
+  }
+  nullable
+}
+
+// FIRST per nonterminal, ε-aware over the rhs prefix.
+fn compute_first(bnf: normalize.Bnf, nullable: List[Int]) -> List[List[Int]] = {
+  var first: List[List[Int]] = list.repeat([], list.len(bnf.nt_display))
+  var changed = true
+  while changed {
+    changed = false
+    let n_prods = list.len(bnf.prod_lhs)
+    for p in 0..<n_prods {
+      let lhs = list.get_or(bnf.prod_lhs, p, 0)
+      let rhs = list.get_or(bnf.prod_rhs, p, [])
+      var cur = list.get_or(first, lhs, [])
+      var grew = false
+      var i = 0
+      var blocked = false
+      while i < list.len(rhs) and not blocked {
+        let s = list.get_or(rhs, i, 0)
+        if normalize.sym_is_nt(s) then {
+          let nt = normalize.sym_nt(s)
+          for t in list.get_or(first, nt, []) {
+            if not list.contains(cur, t) then {
+              cur = cur + [t]
+              grew = true
+              ()
+            }
+            else ()
+          }
+          if list.get_or(nullable, nt, 0) == 0 then blocked = true
+          else ()
+        }
+        else {
+          if not list.contains(cur, s) then {
+            cur = cur + [s]
+            grew = true
+            ()
+          }
+          else ()
+          blocked = true
+        }
+        i = i + 1
+      }
+      if grew then {
+        first[lhs] = cur
+        changed = true
+        ()
+      }
+      else ()
+    }
+  }
+  first
+}
+
+fn compute_follow(
+  bnf: normalize.Bnf,
+  n_nts: Int,
+  nullable: List[Int],
+  first: List[List[Int]],
+  eof: Int,
+) -> List[List[Int]] = {
+  var follow: List[List[Int]] = list.repeat([], n_nts)
+  follow[bnf.start_nt] = [eof]
+  var changed = true
+  while changed {
+    changed = false
+    let n_prods = list.len(bnf.prod_lhs)
+    for p in 0..<n_prods {
+      let lhs = list.get_or(bnf.prod_lhs, p, 0)
+      let rhs = list.get_or(bnf.prod_rhs, p, [])
+      let n = list.len(rhs)
+      for i in 0..<n {
+        let s = list.get_or(rhs, i, 0)
+        if normalize.sym_is_nt(s) then {
+          let nt = normalize.sym_nt(s)
+          var cur = list.get_or(follow, nt, [])
+          var grew = false
+          var j = i + 1
+          var open = true
+          while j < n and open {
+            let s2 = list.get_or(rhs, j, 0)
+            if normalize.sym_is_nt(s2) then {
+              let nt2 = normalize.sym_nt(s2)
+              for t in list.get_or(first, nt2, []) {
+                if not list.contains(cur, t) then {
+                  cur = cur + [t]
+                  grew = true
+                  ()
+                }
+                else ()
+              }
+              if list.get_or(nullable, nt2, 0) == 0 then open = false
+              else ()
+            }
+            else {
+              if not list.contains(cur, s2) then {
+                cur = cur + [s2]
+                grew = true
+                ()
+              }
+              else ()
+              open = false
+            }
+            j = j + 1
+          }
+          if open then {
+            for t in list.get_or(follow, lhs, []) {
+              if not list.contains(cur, t) then {
+                cur = cur + [t]
+                grew = true
+                ()
+              }
+              else ()
+            }
+            ()
+          }
+          else ()
+          if grew then {
+            follow[nt] = cur
+            changed = true
+            ()
+          }
+          else ()
+        }
+        else ()
+      }
+    }
+  }
+  follow
+}

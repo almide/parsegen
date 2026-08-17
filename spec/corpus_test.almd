@@ -1,0 +1,96 @@
+// The A0 conformance test: every case in tree-sitter-json's own test corpus,
+// compared as canonical single-line S-expressions. This file IS the ladder's
+// A0 pass rate.
+
+import self as parsegen
+import self.fixtures_json as fx
+
+// One corpus case.
+type Case = { name: String, input: String, expected: String }
+
+fn sep_line(l: String, ch: String) -> Bool = {
+  let t = string.trim(l)
+  string.len(t) >= 3 and list.all(string.chars(t), (c) => c == ch)
+}
+
+fn parse_corpus(text: String) -> List[Case] = {
+  let lines = string.lines(text)
+  var cases: List[Case] = []
+  var i = 0
+  let n = list.len(lines)
+  while i < n {
+    if sep_line(list.get_or(lines, i, ""), "=") then {
+      let name = string.trim(list.get_or(lines, i + 1, ""))
+      var j = i + 2
+      // Skip the closing ==== of the header.
+      while j < n and not sep_line(list.get_or(lines, j, ""), "=") {
+        j = j + 1
+      }
+      j = j + 1
+      // Input runs until the ---- separator.
+      var input_lines: List[String] = []
+      while j < n and not sep_line(list.get_or(lines, j, ""), "-") {
+        list.push(input_lines, list.get_or(lines, j, ""))
+        j = j + 1
+      }
+      j = j + 1
+      // Expected runs until the next ==== header (or EOF).
+      var exp_lines: List[String] = []
+      while j < n and not sep_line(list.get_or(lines, j, ""), "=") {
+        list.push(exp_lines, list.get_or(lines, j, ""))
+        j = j + 1
+      }
+      let c = Case {
+        name: name,
+        input: list.join(input_lines, "\n"),
+        expected: canon(list.join(exp_lines, " ")),
+      }
+      list.push(cases, c)
+      i = j
+      ()
+    }
+    else i = i + 1
+  }
+  cases
+}
+
+// Collapse all whitespace runs to single spaces; the renderer's canonical
+// single-line form then compares byte-for-byte.
+fn canon(s: String) -> String = {
+  var out = ""
+  var in_ws = true
+  for ch in string.chars(s) {
+    if string.is_whitespace(ch) then {
+      if not in_ws then out = out + " " else ()
+      in_ws = true
+      ()
+    }
+    else {
+      out = out + ch
+      in_ws = false
+      ()
+    }
+  }
+  string.trim(out)
+}
+
+test "A0: the tree-sitter-json corpus" {
+  let cases = parse_corpus(fx.corpus_main())
+  assert_eq(list.len(cases), 6)
+  var failed = 0
+  for c in cases {
+    let got = match parsegen.parse_to_sexpr(fx.grammar_json(), c.input) {
+      ok(s) => canon(s),
+      err(e) => "<error: " + e + ">",
+    }
+    if got == c.expected then ()
+    else {
+      failed = failed + 1
+      println("FAIL: ${c.name}")
+      println("  expected: ${c.expected}")
+      println("  got:      ${got}")
+      ()
+    }
+  }
+  assert_eq(failed, 0)
+}

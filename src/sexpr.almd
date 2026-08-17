@@ -1,0 +1,59 @@
+// sexpr.almd — a parse Tree → tree-sitter's S-expression, canonical
+// single-line form: named nodes only, hidden rules and synthetic nonterminals
+// spliced into their parent, anonymous terminals dropped.
+//
+// (Field labels are tracked in the Bnf but not printed at this rung — the json
+// corpus's own expectations omit them; the rung that needs them will add the
+// label pass.)
+
+import self.normalize
+import self.parse
+
+fn render(bnf: normalize.Bnf, tree: parse.Tree) -> String = {
+  var parts: List[String] = []
+  for x in tree.leading {
+    emit_into(bnf, x, parts)
+  }
+  emit_into(bnf, tree.root, parts)
+  for x in tree.trailing {
+    emit_into(bnf, x, parts)
+  }
+  list.join(parts, " ")
+}
+
+// Append `node`'s rendering (zero or more parenthesized names) to `parts`.
+fn emit_into(bnf: normalize.Bnf, node: parse.Cst, mut parts: List[String]) -> Unit = {
+  match node {
+    parse.Leaf(term, _, _) => {
+      if list.get_or(bnf.term_named, term, 0) == 1 then {
+        list.push(parts, "(" + list.get_or(bnf.term_display, term, "?") + ")")
+        ()
+      }
+      else ()
+    },
+    parse.Inner(nt, children) => {
+      if list.get_or(bnf.nt_hidden, nt, 1) == 1 then {
+        for c in children {
+          emit_into(bnf, c, parts)
+        }
+        ()
+      }
+      else {
+        var inner: List[String] = []
+        for c in children {
+          emit_into(bnf, c, inner)
+        }
+        let name = list.get_or(bnf.nt_display, nt, "?")
+        if list.is_empty(inner) then {
+          list.push(parts, "(" + name + ")")
+          ()
+        }
+        else {
+          list.push(parts, "(" + name + " " + list.join(inner, " ") + ")")
+          ()
+        }
+      }
+    },
+  }
+  ()
+}

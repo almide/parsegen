@@ -1,0 +1,126 @@
+// grammar.almd — read tree-sitter's `src/grammar.json` into a rule tree.
+//
+// The input is the fully evaluated JSON that `tree-sitter generate` commits into
+// every grammar repository — never `grammar.js` (see README: executing the DSL
+// is a permanent non-goal). Seven top-level keys; A0 consumes `rules` and
+// `extras` and requires `externals` to be empty.
+
+import json
+
+// One rule-body node, mirroring grammar.json's tagged objects.
+type Rule =
+  | RSym(String)
+  | RStr(String)
+  | RPat(String)
+  | RBlank
+  | RSeq(List[Rule])
+  | RChoice(List[Rule])
+  | RRepeat(Rule)
+  | RRepeat1(Rule)
+  | RToken(Rule)
+  | RImmediate(Rule)
+  | RPrec(Int, Rule)
+  | RField(String, Rule)
+  | RAlias(String, Bool, Rule)
+
+// A whole grammar: parallel lists (name, body) in declaration order — the
+// FIRST rule is the start symbol — plus the extras.
+type Grammar = {
+  rule_names: List[String],
+  rule_bodies: List[Rule],
+  extras: List[Rule],
+}
+
+fn read(text: String) -> Result[Grammar, String] = {
+  let root = json.parse(text)!
+  let rules = value.field(root, "rules")!
+  let names = value.keys(rules)
+  var bodies: List[Rule] = []
+  for n in names {
+    let b = read_rule(value.field(rules, n)!)!
+    list.push(bodies, b)
+  }
+  let extras_v = value.field(root, "extras")!
+  var extras: List[Rule] = []
+  for e in value.as_array(extras_v)! {
+    let r = read_rule(e)!
+    list.push(extras, r)
+  }
+  let externals = value.as_array(value.field(root, "externals")!)!
+  guard list.is_empty(externals) else err("external scanners are not supported at this rung")
+  ok(Grammar { rule_names: names, rule_bodies: bodies, extras: extras })
+}
+
+// One tagged rule object → Rule. Unknown tags are an error, not a guess.
+fn read_rule(v: Value) -> Result[Rule, String] = {
+  let t = value.as_string(value.field(v, "type")!)!
+  match t {
+    "SYMBOL" => ok(RSym(value.as_string(value.field(v, "name")!)!)),
+    "STRING" => ok(RStr(value.as_string(value.field(v, "value")!)!)),
+    "PATTERN" => ok(RPat(value.as_string(value.field(v, "value")!)!)),
+    "BLANK" => ok(RBlank),
+    "SEQ" => {
+      let ms = read_members(v)!
+      ok(RSeq(ms))
+    },
+    "CHOICE" => {
+      let ms = read_members(v)!
+      ok(RChoice(ms))
+    },
+    "REPEAT" => {
+      let c = read_content(v)!
+      ok(RRepeat(c))
+    },
+    "REPEAT1" => {
+      let c = read_content(v)!
+      ok(RRepeat1(c))
+    },
+    "TOKEN" => {
+      let c = read_content(v)!
+      ok(RToken(c))
+    },
+    "IMMEDIATE_TOKEN" => {
+      let c = read_content(v)!
+      ok(RImmediate(c))
+    },
+    "PREC" => read_prec(v),
+    "PREC_LEFT" => read_prec(v),
+    "PREC_RIGHT" => read_prec(v),
+    "PREC_DYNAMIC" => read_prec(v),
+    "FIELD" => {
+      let name = value.as_string(value.field(v, "name")!)!
+      let c = read_content(v)!
+      ok(RField(name, c))
+    },
+    "ALIAS" => {
+      let name = value.as_string(value.field(v, "value")!)!
+      let named = value.as_bool(value.field(v, "named")!)!
+      let c = read_content(v)!
+      ok(RAlias(name, named, c))
+    },
+    other => err("unsupported rule type '${other}'"),
+  }
+}
+
+// The `members` array of a SEQ/CHOICE.
+fn read_members(v: Value) -> Result[List[Rule], String] = {
+  var out: List[Rule] = []
+  for m in value.as_array(value.field(v, "members")!)! {
+    let r = read_rule(m)!
+    list.push(out, r)
+  }
+  ok(out)
+}
+
+// The `content` child of the single-child wrappers.
+fn read_content(v: Value) -> Result[Rule, String] = read_rule(value.field(v, "content")!)
+
+// PREC/PREC_LEFT/PREC_RIGHT/PREC_DYNAMIC collapse to the value + content at
+// this rung: json's only precedence is lexical (inside a TOKEN), where the
+// value orders tokenization; assoc distinctions only matter once a grammar
+// declares conflicts (A2+).
+fn read_prec(v: Value) -> Result[Rule, String] = {
+  let p = value.as_int(value.field(v, "value")!) ?? 0
+  let c = read_content(v)!
+  ok(RPrec(p, c))
+}

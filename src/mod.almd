@@ -1,0 +1,20 @@
+// parsegen — a tree-sitter compatible parser generator, pure Almide.
+//
+// A0 (LADDER.md): tree-sitter-json — grammar.json in, the same S-expression
+// tree-sitter's own corpus records, out.
+
+import self.grammar
+import self.normalize
+import self.tables
+import self.parse
+import self.sexpr
+
+// Parse `input` with the grammar in `grammar_json`, returning the canonical
+// single-line S-expression, or the first error.
+fn parse_to_sexpr(grammar_json: String, input: String) -> Result[String, String] = {
+  let g = grammar.read(grammar_json)!
+  let bnf = normalize.build(g)!
+  let t = tables.build(bnf)!
+  let tree = parse.run(t, bnf, input)!
+  ok(sexpr.render(bnf, tree))
+}

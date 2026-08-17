@@ -1,0 +1,82 @@
+import self.grammar
+import self.normalize
+import self.fixtures_json as fx
+
+fn bnf() -> Result[normalize.Bnf, String] = {
+  let g = grammar.read(fx.grammar_json())!
+  normalize.build(g)
+}
+
+test "grammar reads: 14 rules, 2 extras" {
+  let g = grammar.read(fx.grammar_json())
+  match g {
+    ok(gr) => {
+      assert_eq(list.len(gr.rule_names), 14)
+      assert_eq(list.len(gr.extras), 2)
+      assert_eq(list.get_or(gr.rule_names, 0, ""), "document")
+    },
+    err(e) => {
+      println("ERR: ${e}")
+      assert(false)
+    },
+  }
+}
+
+test "normalize: named terminals in rule order" {
+  match bnf() {
+    ok(b) => {
+      // Lexical rules of json, in declaration order.
+      assert_eq(list.get_or(b.term_display, 0, ""), "string_content")
+      assert_eq(list.get_or(b.term_display, 1, ""), "escape_sequence")
+      assert_eq(list.get_or(b.term_display, 2, ""), "number")
+      assert_eq(list.get_or(b.term_display, 3, ""), "true")
+      assert_eq(list.get_or(b.term_display, 4, ""), "false")
+      assert_eq(list.get_or(b.term_display, 5, ""), "null")
+      assert_eq(list.get_or(b.term_display, 6, ""), "comment")
+      // string_content / escape_sequence are IMMEDIATE, others not.
+      assert_eq(list.get_or(b.term_immediate, 0, 9), 1)
+      assert_eq(list.get_or(b.term_immediate, 1, 9), 1)
+      assert_eq(list.get_or(b.term_immediate, 2, 9), 0)
+      // string_content carries token prec 1.
+      assert_eq(list.get_or(b.term_prec, 0, 9), 1)
+      // All seven named; anonymous terminals exist beyond them.
+      assert(b.n_terms > 7)
+      assert_eq(list.get_or(b.term_named, 0, 9), 1)
+      assert_eq(list.get_or(b.term_named, 7, 9), 0)
+    },
+    err(e) => {
+      println("ERR: ${e}")
+      assert(false)
+    },
+  }
+}
+
+test "normalize: nonterminals and hidden flags" {
+  match bnf() {
+    ok(b) => {
+      // Syntactic rules: document, _value, object, pair, array, string, _string_content.
+      assert_eq(list.get_or(b.nt_display, 0, ""), "document")
+      assert_eq(list.get_or(b.nt_display, 1, ""), "_value")
+      assert_eq(list.get_or(b.nt_hidden, 0, 9), 0)
+      assert_eq(list.get_or(b.nt_hidden, 1, 9), 1)
+      assert_eq(b.start_nt, 0)
+      // Extras: whitespace pattern + the comment terminal (id 6).
+      assert_eq(list.len(b.extra_terms), 2)
+      assert(list.contains(b.extra_terms, 6))
+      // Every production's symbols resolve (terminal below n_terms or NT_BASE+nt).
+      for rhs in b.prod_rhs {
+        for s in rhs {
+          assert(s < b.n_terms or normalize.sym_is_nt(s))
+          if normalize.sym_is_nt(s) then
+            assert(normalize.sym_nt(s) < list.len(b.nt_display))
+          else ()
+        }
+      }
+      assert(list.len(b.prod_lhs) > 8)
+    },
+    err(e) => {
+      println("ERR: ${e}")
+      assert(false)
+    },
+  }
+}

@@ -1,0 +1,6 @@
+[package]
+name = "parsegen"
+version = "0.1.0"
+
+[dependencies]
+dfa = { git = "https://github.com/almide/dfa", tag = "v0.1.0" }

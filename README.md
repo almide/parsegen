@@ -54,7 +54,16 @@ Two grammars are out of scope for this reason: **yaml** declares 113 external to
 
 ## Status
 
-Design phase. Nothing is implemented yet.
+**A0 passes: 6/6 of tree-sitter-json's own corpus, byte-identical S-expressions.**
+The pipeline is grammar.json → BNF normalization (hidden/synthetic rules,
+left-recursive repeats) → SLR(1) tables → state-directed lexing over
+[almide/dfa](https://github.com/almide/dfa) (per-state valid-token machines —
+tree-sitter's "no separate lexer" property) → LR runtime with extras threading →
+canonical S-expression.
+
+Native only for now: the wasm leg hits five compiler lowering walls
+(`tools/wasm-check.sh` reproduces them), filed upstream — the same
+wall-then-fix-the-compiler loop that took almide/dfa to the wasm leg.
 
 ## Related
 

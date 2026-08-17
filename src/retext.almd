@@ -1,0 +1,131 @@
+// retext.almd — a lexical rule subtree → one regex string in almide/dfa's dialect.
+//
+// Two dialect gaps between tree-sitter's JS-flavoured patterns and dfa's:
+//   - `.`: JS (and tree-sitter's Rust regex) excludes newline, dfa's matches any
+//     codepoint — rewritten to `[^\n]` here.
+//   - anchors don't exist in dfa (it matches at a position by construction) and
+//     tree-sitter never needs them in token patterns.
+// Everything else json needs (classes, negation, escapes, `+ * ?`, groups,
+// alternation) is shared.
+
+import self.grammar
+
+// The regex for a whole lexical rule body. `RPrec` is transparent (its value is
+// read separately by the terminal collector); structural nodes compose:
+// SEQ → concatenation, CHOICE → grouped alternation (a BLANK member makes the
+// group optional), REPEAT/REPEAT1 → `(…)*` / `(…)+`.
+fn of_rule(r: grammar.Rule) -> Result[String, String] = match r {
+  grammar.RStr(s) => ok(quote(s)),
+  grammar.RPat(p) => ok(fix_dots(p)),
+  grammar.RBlank => ok(""),
+  grammar.RPrec(_, inner) => of_rule(inner),
+  grammar.RToken(inner) => of_rule(inner),
+  grammar.RImmediate(inner) => of_rule(inner),
+  grammar.RSeq(ms) => {
+    var out = ""
+    for m in ms {
+      let piece = of_rule(m)!
+      out = out + group(piece)
+    }
+    ok(out)
+  },
+  grammar.RChoice(ms) => {
+    var pieces: List[String] = []
+    var has_blank = false
+    for m in ms {
+      if is_blank(m) then {
+        has_blank = true
+        ()
+      }
+      else {
+        let piece = of_rule(m)!
+        list.push(pieces, piece)
+        ()
+      }
+    }
+    let body = "(" + list.join(pieces, "|") + ")"
+    ok(if has_blank then body + "?" else body)
+  },
+  grammar.RRepeat(inner) => {
+    let piece = of_rule(inner)!
+    ok(group(piece) + "*")
+  },
+  grammar.RRepeat1(inner) => {
+    let piece = of_rule(inner)!
+    ok(group(piece) + "+")
+  },
+  _ => err("rule shape not expressible as a token"),
+}
+
+// Wrap in a non-capturing-style group unless it is already atomic. dfa has no
+// capture semantics, so plain parentheses are free.
+fn group(s: String) -> String =
+  if string.len(s) <= 1 then s
+  else if atomic_class(s) then s
+  else "(" + s + ")"
+
+// A single `[…]` class (possibly followed by nothing) — safe to quantify bare.
+fn atomic_class(s: String) -> Bool = {
+  guard string.starts_with(s, "[") else false
+  // The class must END the string at its own closing bracket.
+  var i = 1
+  var closed = 0 - 1
+  let n = string.len(s)
+  while i < n {
+    let ch = string.get(s, i) ?? ""
+    if ch == "\\" then i = i + 2
+    else if ch == "]" and i > 1 then {
+      closed = i
+      i = n
+    }
+    else i = i + 1
+  }
+  closed == n - 1
+}
+
+// Escape a literal for the dfa dialect: any non-alphanumeric codepoint is
+// backslashed (over-escaping is harmless there — an unknown escape is the
+// literal char), except the escapes with their own meaning, which are spelled
+// via their class-free forms.
+fn quote(s: String) -> String = {
+  var out = ""
+  for ch in string.chars(s) {
+    out = out + quote_char(ch)
+  }
+  out
+}
+
+fn quote_char(ch: String) -> String =
+  if string.is_alphanumeric(ch) then ch
+  else if ch == "\n" then "\\n"
+  else if ch == "\t" then "\\t"
+  else if ch == "\r" then "\\r"
+  else "\\" + ch
+
+fn is_blank(r: grammar.Rule) -> Bool = match r {
+  grammar.RBlank => true,
+  _ => false,
+}
+
+// Rewrite every unescaped `.` outside a class to `[^\n]`.
+fn fix_dots(p: String) -> String = {
+  var out = ""
+  var in_class = false
+  var i = 0
+  let n = string.len(p)
+  while i < n {
+    let ch = string.get(p, i) ?? ""
+    if ch == "\\" then {
+      out = out + ch + (string.get(p, i + 1) ?? "")
+      i = i + 2
+    }
+    else {
+      if ch == "[" and not in_class then in_class = true
+      else if ch == "]" and in_class then in_class = false
+      else ()
+      out = out + (if ch == "." and not in_class then "[^\\n]" else ch)
+      i = i + 1
+    }
+  }
+  out
+}

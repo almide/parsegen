@@ -1,0 +1,216 @@
+// parse.almd — the LR runtime: state-directed lexing (almide/dfa) + the LR
+// loop + extras threading.
+//
+// tree-sitter has no separate lexer — the set of terminals the CURRENT parse
+// state accepts decides what may be lexed next. That is what makes `//` inside
+// a JSON string content rather than a comment: the in-string state's valid set
+// simply does not contain `comment`. Here every state gets its own dfa over
+// exactly its valid terminals, ordered by (higher token-prec first, then
+// declaration order) so dfa's leftmost-longest + lowest-id tie-break IS
+// tree-sitter's lexical conflict rule.
+//
+// Extras (whitespace, comments) are lexed between tokens with a shared dfa.
+// A named extra (a comment) becomes a real node, attached as TRAILING of the
+// node currently on top of the stack — which places it as a sibling AFTER
+// whatever just closed, and inline between tokens otherwise; exactly where
+// tree-sitter's corpus expects it.
+
+import dfa
+import self.normalize
+import self.tables
+
+type Cst =
+  | Leaf(Int, Int, Int)
+  | Inner(Int, List[Cst])
+
+// The parse result: extras before the first token, the root, extras after it.
+type Tree = {
+  leading: List[Cst],
+  root: Cst,
+  trailing: List[Cst],
+}
+
+// Per-state lexer bundle, parallel to states: `dfa_idx` points into `machines`
+// (-1 = the state accepts no terminal, only EOF); `maps` translates a machine's
+// pattern index back to the terminal id.
+type Lexers = {
+  dfa_idx: List[Int],
+  machines: List[dfa.Dfa],
+  maps: List[List[Int]],
+  extras: dfa.Dfa,
+  extra_map: List[Int],
+}
+
+fn run(t: tables.Tables, bnf: normalize.Bnf, input: String) -> Result[Tree, String] = {
+  let lx = build_lexers(t, bnf)!
+  let cps = dfa.codepoints(input)
+  let n = list.len(cps)
+  let eof = bnf.n_terms
+  let n_nts = list.len(bnf.nt_display)
+  var state_stack: List[Int] = [0]
+  var nodes: List[Cst] = []
+  var trails: List[List[Cst]] = []
+  var leading: List[Cst] = []
+  var pos = 0
+  var done = false
+  var root = Leaf(0, 0, 0)
+  while not done {
+    let st = list.get_or(state_stack, list.len(state_stack) - 1, 0)
+    // ── lex one token in this state ────────────────
+    var tok = 0 - 1
+    var tok_len = 0
+    var lexed = false
+    while not lexed {
+      let di = list.get_or(lx.dfa_idx, st, 0 - 1)
+      var hit = false
+      if di >= 0 and pos < n then {
+        let m = dfa.scan_cps(list.get_or(lx.machines, di, lx.extras), cps, pos)
+        match m {
+          some(mm) => {
+            if mm.len > 0 then {
+              tok = list.get_or(list.get_or(lx.maps, di, []), mm.id, 0)
+              tok_len = mm.len
+              hit = true
+              ()
+            }
+            else ()
+          },
+          none => (),
+        }
+        ()
+      }
+      else ()
+      if hit then lexed = true
+      else if pos >= n then {
+        tok = eof
+        tok_len = 0
+        lexed = true
+        ()
+      }
+      else {
+        // Extras: skip whitespace, materialize named extras (comments).
+        let em = dfa.scan_cps(lx.extras, cps, pos)
+        let elen = match em { some(mm) => mm.len, none => 0 }
+        guard elen > 0 else err(lex_error(bnf, pos))
+        let eid = match em { some(mm) => mm.id, none => 0 }
+        let ext_term = list.get_or(lx.extra_map, eid, 0)
+        if list.get_or(bnf.term_named, ext_term, 0) == 1 then {
+          let node = Leaf(ext_term, pos, pos + elen)
+          if list.is_empty(nodes) then {
+            list.push(leading, node)
+            ()
+          }
+          else {
+            var tl = list.get_or(trails, list.len(trails) - 1, [])
+            tl = tl + [node]
+            trails[list.len(trails) - 1] = tl
+            ()
+          }
+          ()
+        }
+        else ()
+        pos = pos + elen
+        ()
+      }
+    }
+    // ── one ACTION step ────────────────────────────
+    let a = list.get_or(t.action, st * t.n_terms1 + tok, 0)
+    if tables.act_is_shift(a) then {
+      list.push(nodes, Leaf(tok, pos, pos + tok_len))
+      list.push(trails, [])
+      list.push(state_stack, tables.act_shift_state(a))
+      pos = pos + tok_len
+      ()
+    }
+    else if tables.act_is_reduce(a) or tables.act_is_accept(a) then {
+      let p = if tables.act_is_accept(a) then tables.act_accept_prod(a) else tables.act_reduce_prod(a)
+      let rhs = list.get_or(bnf.prod_rhs, p, [])
+      let k = list.len(rhs)
+      var children: List[Cst] = []
+      var new_trail: List[Cst] = []
+      let base = list.len(nodes) - k
+      for i in 0..<k {
+        let child = list.get_or(nodes, base + i, root)
+        let tl = list.get_or(trails, base + i, [])
+        list.push(children, child)
+        if i == k - 1 then new_trail = tl
+        else children = children + tl
+      }
+      var j = 0
+      while j < k {
+        let _ = list.pop(nodes)
+        let _ = list.pop(trails)
+        let _ = list.pop(state_stack)
+        j = j + 1
+      }
+      let lhs = list.get_or(bnf.prod_lhs, p, 0)
+      list.push(nodes, Inner(lhs, children))
+      list.push(trails, new_trail)
+      if tables.act_is_accept(a) then {
+        root = Inner(lhs, children)
+        done = true
+        ()
+      }
+      else {
+        let st2 = list.get_or(state_stack, list.len(state_stack) - 1, 0)
+        let g = list.get_or(t.goto_t, st2 * n_nts + lhs, 0)
+        guard g != 0 else err("internal: missing goto")
+        list.push(state_stack, g - 1)
+        ()
+      }
+      ()
+    }
+    else {
+      let tn = if tok == eof then "<eof>" else list.get_or(bnf.term_display, tok, "?")
+      guard false else err("parse error at ${int.to_string(pos)}: unexpected '${tn}'")
+      ()
+    }
+  }
+  let trailing = list.get_or(trails, list.len(trails) - 1, [])
+  ok(Tree { leading: leading, root: root, trailing: trailing })
+}
+
+fn lex_error(bnf: normalize.Bnf, pos: Int) -> String =
+  "lex error at ${int.to_string(pos)}"
+
+// ── per-state lexers ───────────────────────────────
+
+fn build_lexers(t: tables.Tables, bnf: normalize.Bnf) -> Result[Lexers, String] = {
+  var dfa_idx: List[Int] = []
+  var machines: List[dfa.Dfa] = []
+  var maps: List[List[Int]] = []
+  for s in 0..<t.n_states {
+    // Valid terminals of this state, ordered by (-token prec, id): dfa breaks
+    // a length tie by LOWER pattern index, so higher-prec-then-earlier wins.
+    var terms: List[Int] = []
+    for tid in 0..<bnf.n_terms {
+      if list.get_or(t.action, s * t.n_terms1 + tid, 0) != 0 then {
+        list.push(terms, tid)
+        ()
+      }
+      else ()
+    }
+    terms = list.sort_by(terms, (tid) => 0 - list.get_or(bnf.term_prec, tid, 0) * 100000 + tid)
+    if list.is_empty(terms) then {
+      list.push(dfa_idx, 0 - 1)
+      ()
+    }
+    else {
+      let pats = list.map(terms, (tid) => list.get_or(bnf.term_regex, tid, ""))
+      let m = dfa.compile(pats)!
+      list.push(dfa_idx, list.len(machines))
+      list.push(machines, m)
+      list.push(maps, terms)
+      ()
+    }
+  }
+  let ex_pats = list.map(bnf.extra_terms, (tid) => list.get_or(bnf.term_regex, tid, ""))
+  let ex = dfa.compile(ex_pats)!
+  ok(Lexers {
+    dfa_idx: dfa_idx,
+    machines: machines,
+    maps: maps,
+    extras: ex,
+    extra_map: bnf.extra_terms,
+  })
+}
