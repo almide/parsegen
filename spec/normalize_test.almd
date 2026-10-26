@@ -13,7 +13,7 @@ test "grammar reads: 14 rules, 2 extras" {
     ok(gr) => {
       assert_eq(list.len(gr.rule_names), 14)
       assert_eq(list.len(gr.extras), 2)
-      assert_eq(list.get_or(gr.rule_names, 0, ""), "document")
+      assert_eq(list.get(gr.rule_names, 0) ?? "", "document")
     },
     err(e) => {
       println("ERR: ${e}")
@@ -26,23 +26,23 @@ test "normalize: named terminals in rule order" {
   match bnf() {
     ok(b) => {
       // Lexical rules of json, in declaration order.
-      assert_eq(list.get_or(b.term_display, 0, ""), "string_content")
-      assert_eq(list.get_or(b.term_display, 1, ""), "escape_sequence")
-      assert_eq(list.get_or(b.term_display, 2, ""), "number")
-      assert_eq(list.get_or(b.term_display, 3, ""), "true")
-      assert_eq(list.get_or(b.term_display, 4, ""), "false")
-      assert_eq(list.get_or(b.term_display, 5, ""), "null")
-      assert_eq(list.get_or(b.term_display, 6, ""), "comment")
+      assert_eq(list.get(b.term_display, 0) ?? "", "string_content")
+      assert_eq(list.get(b.term_display, 1) ?? "", "escape_sequence")
+      assert_eq(list.get(b.term_display, 2) ?? "", "number")
+      assert_eq(list.get(b.term_display, 3) ?? "", "true")
+      assert_eq(list.get(b.term_display, 4) ?? "", "false")
+      assert_eq(list.get(b.term_display, 5) ?? "", "null")
+      assert_eq(list.get(b.term_display, 6) ?? "", "comment")
       // string_content / escape_sequence are IMMEDIATE, others not.
-      assert_eq(list.get_or(b.term_immediate, 0, 9), 1)
-      assert_eq(list.get_or(b.term_immediate, 1, 9), 1)
-      assert_eq(list.get_or(b.term_immediate, 2, 9), 0)
+      assert_eq(list.get(b.term_immediate, 0) ?? 9, 1)
+      assert_eq(list.get(b.term_immediate, 1) ?? 9, 1)
+      assert_eq(list.get(b.term_immediate, 2) ?? 9, 0)
       // string_content carries token prec 1.
-      assert_eq(list.get_or(b.term_prec, 0, 9), 1)
+      assert_eq(list.get(b.term_prec, 0) ?? 9, 1)
       // All seven named; anonymous terminals exist beyond them.
       assert(b.n_terms > 7)
-      assert_eq(list.get_or(b.term_named, 0, 9), 1)
-      assert_eq(list.get_or(b.term_named, 7, 9), 0)
+      assert_eq(list.get(b.term_named, 0) ?? 9, 1)
+      assert_eq(list.get(b.term_named, 7) ?? 9, 0)
     },
     err(e) => {
       println("ERR: ${e}")
@@ -55,10 +55,10 @@ test "normalize: nonterminals and hidden flags" {
   match bnf() {
     ok(b) => {
       // Syntactic rules: document, _value, object, pair, array, string, _string_content.
-      assert_eq(list.get_or(b.nt_display, 0, ""), "document")
-      assert_eq(list.get_or(b.nt_display, 1, ""), "_value")
-      assert_eq(list.get_or(b.nt_hidden, 0, 9), 0)
-      assert_eq(list.get_or(b.nt_hidden, 1, 9), 1)
+      assert_eq(list.get(b.nt_display, 0) ?? "", "document")
+      assert_eq(list.get(b.nt_display, 1) ?? "", "_value")
+      assert_eq(list.get(b.nt_hidden, 0) ?? 9, 0)
+      assert_eq(list.get(b.nt_hidden, 1) ?? 9, 1)
       assert_eq(b.start_nt, 0)
       // Extras: whitespace pattern + the comment terminal (id 6).
       assert_eq(list.len(b.extra_terms), 2)
