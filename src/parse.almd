@@ -16,6 +16,7 @@
 // tree-sitter's corpus expects it.
 
 import dfa
+import dfa.table
 import self.normalize
 import self.tables
 
@@ -35,9 +36,9 @@ type Tree = {
 // pattern index back to the terminal id.
 type Lexers = {
   dfa_idx: List[Int],
-  machines: List[dfa.Dfa],
+  machines: List[table.Dfa],
   maps: List[List[Int]],
-  extras: dfa.Dfa,
+  extras: table.Dfa,
   extra_map: List[Int],
 }
 
@@ -244,7 +245,7 @@ fn build_lexers(t: tables.Tables, bnf: normalize.Bnf) -> Result[Lexers, String] 
 // The three per-state lists under construction.
 type LexAcc = {
   dfa_idx: List[Int],
-  machines: List[dfa.Dfa],
+  machines: List[table.Dfa],
   maps: List[List[Int]],
 }
 
