@@ -20,7 +20,7 @@ fn render(bnf: normalize.Bnf, tree: parse.Tree) -> String = {
 fn emit_list(bnf: normalize.Bnf, xs: List[parse.Cst], i: Int, parts: List[String]) -> List[String] =
   if i >= list.len(xs) then parts
   else {
-    let x = list.get_or(xs, i, parse.Leaf(0, 0, 0))
+    let x = (list.get(xs, i) ?? (parse.Leaf(0, 0, 0)))
     let parts2 = emit_node(bnf, x, parts)
     emit_list(bnf, xs, i + 1, parts2)
   }
@@ -29,16 +29,16 @@ fn emit_list(bnf: normalize.Bnf, xs: List[parse.Cst], i: Int, parts: List[String
 fn emit_node(bnf: normalize.Bnf, node: parse.Cst, parts: List[String]) -> List[String] =
   match node {
     parse.Leaf(term, _, _) => {
-      let named = list.get_or(bnf.term_named, term, 0)
-      if named == 1 then parts + ["(" + list.get_or(bnf.term_display, term, "?") + ")"]
+      let named = (list.get(bnf.term_named, term) ?? (0))
+      if named == 1 then parts + ["(" + (list.get(bnf.term_display, term) ?? ("?")) + ")"]
       else parts
     },
     parse.Inner(nt, children) => {
-      let hidden = list.get_or(bnf.nt_hidden, nt, 1)
+      let hidden = (list.get(bnf.nt_hidden, nt) ?? (1))
       if hidden == 1 then emit_list(bnf, children, 0, parts)
       else {
         let inner = emit_list(bnf, children, 0, [])
-        let name = list.get_or(bnf.nt_display, nt, "?")
+        let name = (list.get(bnf.nt_display, nt) ?? ("?"))
         if list.is_empty(inner) then parts + ["(" + name + ")"]
         else parts + ["(" + name + " " + list.join(inner, " ") + ")"]
       }

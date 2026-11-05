@@ -37,13 +37,13 @@ type Grammar = {
 
 fn read(text: String) -> Result[Grammar, String] = {
   let root = json.parse(text)!
-  let rules = value.field(root, "rules")!
-  let names = value.keys(rules)
+  let rules = option.to_result(value.get(root, "rules"), "missing field 'rules'")!
+  let names = list.map(value.as_object(rules) ?? [], (kv) => kv.0)
   let bodies = read_bodies(rules, names, 0, [])!
-  let extras_v = value.field(root, "extras")!
+  let extras_v = option.to_result(value.get(root, "extras"), "missing field 'extras'")!
   let extras_list = value.as_array(extras_v)!
   let extras = read_list(extras_list, 0, [])!
-  let externals_v = value.field(root, "externals")!
+  let externals_v = option.to_result(value.get(root, "externals"), "missing field 'externals'")!
   let externals = value.as_array(externals_v)!
   guard list.is_empty(externals) else err("external scanners are not supported at this rung")
   ok(Grammar { rule_names: names, rule_bodies: bodies, extras: extras })
@@ -53,8 +53,8 @@ fn read(text: String) -> Result[Grammar, String] = {
 fn read_bodies(rules: Value, names: List[String], i: Int, acc: List[Rule]) -> Result[List[Rule], String] =
   if i >= list.len(names) then ok(acc)
   else {
-    let name = list.get_or(names, i, "")
-    let rv = value.field(rules, name)!
+    let name = (list.get(names, i) ?? (""))
+    let rv = option.to_result(value.get(rules, name), "missing field '" + name + "'")!
     let r = read_rule(rv)!
     read_bodies(rules, names, i + 1, acc + [r])
   }
@@ -63,28 +63,28 @@ fn read_bodies(rules: Value, names: List[String], i: Int, acc: List[Rule]) -> Re
 fn read_list(vs: List[Value], i: Int, acc: List[Rule]) -> Result[List[Rule], String] =
   if i >= list.len(vs) then ok(acc)
   else {
-    let v = list.get_or(vs, i, value.null())
+    let v = (list.get(vs, i) ?? (value.null()))
     let r = read_rule(v)!
     read_list(vs, i + 1, acc + [r])
   }
 
 // One tagged rule object → Rule. Unknown tags are an error, not a guess.
 fn read_rule(v: Value) -> Result[Rule, String] = {
-  let tv = value.field(v, "type")!
+  let tv = option.to_result(value.get(v, "type"), "missing field 'type'")!
   let t = value.as_string(tv)!
   match t {
     "SYMBOL" => {
-      let nv = value.field(v, "name")!
+      let nv = option.to_result(value.get(v, "name"), "missing field 'name'")!
       let name = value.as_string(nv)!
       ok(RSym(name))
     },
     "STRING" => {
-      let sv = value.field(v, "value")!
+      let sv = option.to_result(value.get(v, "value"), "missing field 'value'")!
       let s = value.as_string(sv)!
       ok(RStr(s))
     },
     "PATTERN" => {
-      let pv = value.field(v, "value")!
+      let pv = option.to_result(value.get(v, "value"), "missing field 'value'")!
       let p = value.as_string(pv)!
       ok(RPat(p))
     },
@@ -118,15 +118,15 @@ fn read_rule(v: Value) -> Result[Rule, String] = {
     "PREC_RIGHT" => read_prec(v),
     "PREC_DYNAMIC" => read_prec(v),
     "FIELD" => {
-      let nv = value.field(v, "name")!
+      let nv = option.to_result(value.get(v, "name"), "missing field 'name'")!
       let name = value.as_string(nv)!
       let c = read_content(v)!
       ok(RField(name, c))
     },
     "ALIAS" => {
-      let nv = value.field(v, "value")!
+      let nv = option.to_result(value.get(v, "value"), "missing field 'value'")!
       let name = value.as_string(nv)!
-      let bv = value.field(v, "named")!
+      let bv = option.to_result(value.get(v, "named"), "missing field 'named'")!
       let named = value.as_bool(bv)!
       let c = read_content(v)!
       ok(RAlias(name, named, c))
@@ -137,14 +137,14 @@ fn read_rule(v: Value) -> Result[Rule, String] = {
 
 // The `members` array of a SEQ/CHOICE.
 fn read_members(v: Value) -> Result[List[Rule], String] = {
-  let mv = value.field(v, "members")!
+  let mv = option.to_result(value.get(v, "members"), "missing field 'members'")!
   let ms = value.as_array(mv)!
   read_list(ms, 0, [])
 }
 
 // The `content` child of the single-child wrappers.
 fn read_content(v: Value) -> Result[Rule, String] = {
-  let cv = value.field(v, "content")!
+  let cv = option.to_result(value.get(v, "content"), "missing field 'content'")!
   read_rule(cv)
 }
 
@@ -153,7 +153,7 @@ fn read_content(v: Value) -> Result[Rule, String] = {
 // value orders tokenization; assoc distinctions only matter once a grammar
 // declares conflicts (A2+).
 fn read_prec(v: Value) -> Result[Rule, String] = {
-  let pv = value.field(v, "value")!
+  let pv = option.to_result(value.get(v, "value"), "missing field 'value'")!
   let p = value.as_int(pv) ?? 0
   let c = read_content(v)!
   ok(RPrec(p, c))
