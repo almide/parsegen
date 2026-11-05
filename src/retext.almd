@@ -89,7 +89,7 @@ fn atomic_class(s: String) -> Bool = {
 // via their class-free forms.
 fn quote(s: String) -> String = {
   var out = ""
-  for ch in string.chars(s) {
+  for ch in string.to_list(s) {
     out = out + quote_char(ch)
   }
   out

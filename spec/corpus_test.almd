@@ -10,7 +10,7 @@ type Case = { name: String, input: String, expected: String }
 
 fn sep_line(l: String, ch: String) -> Bool = {
   let t = string.trim(l)
-  string.len(t) >= 3 and list.all(string.chars(t), (c) => c == ch)
+  string.len(t) >= 3 and list.all(string.to_list(t), (c) => c == ch)
 }
 
 fn parse_corpus(text: String) -> List[Case] = {
@@ -19,25 +19,25 @@ fn parse_corpus(text: String) -> List[Case] = {
   var i = 0
   let n = list.len(lines)
   while i < n {
-    if sep_line(list.get_or(lines, i, ""), "=") then {
-      let name = string.trim(list.get_or(lines, i + 1, ""))
+    if sep_line((list.get(lines, i) ?? ("")), "=") then {
+      let name = string.trim((list.get(lines, i + 1) ?? ("")))
       var j = i + 2
       // Skip the closing ==== of the header.
-      while j < n and not sep_line(list.get_or(lines, j, ""), "=") {
+      while j < n and not sep_line((list.get(lines, j) ?? ("")), "=") {
         j = j + 1
       }
       j = j + 1
       // Input runs until the ---- separator.
       var input_lines: List[String] = []
-      while j < n and not sep_line(list.get_or(lines, j, ""), "-") {
-        list.push(input_lines, list.get_or(lines, j, ""))
+      while j < n and not sep_line((list.get(lines, j) ?? ("")), "-") {
+        list.push(input_lines, (list.get(lines, j) ?? ("")))
         j = j + 1
       }
       j = j + 1
       // Expected runs until the next ==== header (or EOF).
       var exp_lines: List[String] = []
-      while j < n and not sep_line(list.get_or(lines, j, ""), "=") {
-        list.push(exp_lines, list.get_or(lines, j, ""))
+      while j < n and not sep_line((list.get(lines, j) ?? ("")), "=") {
+        list.push(exp_lines, (list.get(lines, j) ?? ("")))
         j = j + 1
       }
       let c = Case {
@@ -59,7 +59,7 @@ fn parse_corpus(text: String) -> List[Case] = {
 fn canon(s: String) -> String = {
   var out = ""
   var in_ws = true
-  for ch in string.chars(s) {
+  for ch in string.to_list(s) {
     if string.is_whitespace(ch) then {
       if not in_ws then out = out + " " else ()
       in_ws = true

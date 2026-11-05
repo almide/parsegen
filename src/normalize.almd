@@ -73,7 +73,7 @@ fn build(g: grammar.Grammar) -> Result[Bnf, String] = {
   let b2 = pass2(g, 0, b1)!
   let we = extras_rec(g, 0, WithExtras { b: b2, terms: [] })!
   let b3 = we.b
-  let nt0 = list.get_or(g.rule_names, 0, "")
+  let nt0 = (list.get(g.rule_names, 0) ?? (""))
   ok(Bnf {
     n_terms: list.len(b3.term_display),
     term_display: b3.term_display,
@@ -96,8 +96,8 @@ fn build(g: grammar.Grammar) -> Result[Bnf, String] = {
 fn pass1(g: grammar.Grammar, i: Int, b: Build) -> Result[Build, String] =
   if i >= list.len(g.rule_names) then ok(b)
   else {
-    let name = list.get_or(g.rule_names, i, "")
-    let body = list.get_or(g.rule_bodies, i, grammar.RBlank)
+    let name = (list.get(g.rule_names, i) ?? (""))
+    let body = (list.get(g.rule_bodies, i) ?? (grammar.RBlank))
     if is_lexical(body) then {
       let rx = retext.of_rule(body)!
       let w = intern_term(b, "n:" + name, name, rx, named_rule(name), top_immediate(body), top_prec(body))
@@ -117,8 +117,8 @@ fn pass1(g: grammar.Grammar, i: Int, b: Build) -> Result[Build, String] =
 fn pass2(g: grammar.Grammar, i: Int, b: Build) -> Result[Build, String] =
   if i >= list.len(g.rule_names) then ok(b)
   else {
-    let name = list.get_or(g.rule_names, i, "")
-    let body = list.get_or(g.rule_bodies, i, grammar.RBlank)
+    let name = (list.get(g.rule_names, i) ?? (""))
+    let body = (list.get(g.rule_bodies, i) ?? (grammar.RBlank))
     if is_lexical(body) then pass2(g, i + 1, b)
     else {
       let lhs = list.index_of(b.nt_display, name) ?? 0
@@ -132,7 +132,7 @@ fn pass2(g: grammar.Grammar, i: Int, b: Build) -> Result[Build, String] =
 fn extras_rec(g: grammar.Grammar, i: Int, we: WithExtras) -> Result[WithExtras, String] =
   if i >= list.len(g.extras) then ok(we)
   else {
-    let e = list.get_or(g.extras, i, grammar.RBlank)
+    let e = (list.get(g.extras, i) ?? (grammar.RBlank))
     let w = extra_term(we.b, e)!
     extras_rec(g, i + 1, WithExtras { b: w.b, terms: we.terms + [w.id] })
   }
@@ -235,7 +235,7 @@ fn add_alternatives(b: Build, lhs: Int, body: grammar.Rule) -> Result[Build, Str
 fn alts_rec(b: Build, lhs: Int, ms: List[grammar.Rule], i: Int) -> Result[Build, String] =
   if i >= list.len(ms) then ok(b)
   else {
-    let m = list.get_or(ms, i, grammar.RBlank)
+    let m = (list.get(ms, i) ?? (grammar.RBlank))
     let b2 = add_one_alt(b, lhs, m)!
     alts_rec(b2, lhs, ms, i + 1)
   }
@@ -301,7 +301,7 @@ fn seq_into(w: WithSeq, r: grammar.Rule, field: String) -> Result[WithSeq, Strin
 fn seq_list(w: WithSeq, ms: List[grammar.Rule], i: Int, field: String) -> Result[WithSeq, String] =
   if i >= list.len(ms) then ok(w)
   else {
-    let m = list.get_or(ms, i, grammar.RBlank)
+    let m = (list.get(ms, i) ?? (grammar.RBlank))
     let w2 = seq_into(w, m, field)!
     seq_list(w2, ms, i + 1, field)
   }
